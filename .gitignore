@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+*.so
+*.pyd
+.DS_Store
+FastNoise2/

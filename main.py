@@ -1,0 +1,773 @@
+import math
+import time
+import random
+import ctypes
+
+import pyglet
+from pyglet.gl import *
+from pyglet.window import key, mouse
+
+from MCworld import World
+
+block_id = [
+    "block.minecraft.dev.sector_not_loaded",
+    "block.minecraft.dev.air",
+    "block.minecraft.nature.grass_block",
+    "block.minecraft.nature.dirt",
+    "block.minecraft.nature.stone",
+    "block.minecraft.nature.bedrock",
+    "block.minecraft.wood.oak_log",
+    "block.minecraft.wood.oak_leaves",
+]
+
+gamerule = {
+    'tick_per_second': 20,
+    'random_tick_speed': 3,
+    'walk_speed': 4.3,
+    'sneek_speed': 1.52,
+    'run_speed': 5.6,
+    'run_jump_speed': 7.5,
+    'fly_speed': 11,
+    'fly_run_speed': 22,
+    'gravity': 32,
+    'jump_speed': 8.85,
+    'max_speed': 64.0,
+}
+
+def cube_vertices(x, y, z, n):
+    """ Return the vertices of the cube at position x, y, z with size 2*n.
+
+    """
+    return [
+        [x-n,y+n,z-n, x-n,y+n,z+n, x+n,y+n,z+n, x+n,y+n,z-n],  # top
+        [x-n,y-n,z-n, x+n,y-n,z-n, x+n,y-n,z+n, x-n,y-n,z+n],  # bottom
+        [x-n,y-n,z-n, x-n,y-n,z+n, x-n,y+n,z+n, x-n,y+n,z-n],  # left
+        [x+n,y-n,z+n, x+n,y-n,z-n, x+n,y+n,z-n, x+n,y+n,z+n],  # right
+        [x-n,y-n,z+n, x+n,y-n,z+n, x+n,y+n,z+n, x-n,y+n,z+n],  # front
+        [x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n],  # back
+    ]
+
+def tex_coord(x, y, n=4):
+    """ Return the bounding vertices of the texture square.
+    加载贴图
+
+    """
+    m = 1.0 / n
+    dx = x * m
+    dy = y * m
+    return dx, dy, dx + m, dy, dx + m, dy + m, dx, dy + m
+
+
+def tex_coords(top, bottom, side):
+    """ Return a list of the texture squares for the top, bottom and side.
+
+    """
+    top = tex_coord(*top)
+    bottom = tex_coord(*bottom)
+    side = tex_coord(*side)
+    result = []
+    result.append(top)
+    result.append(bottom)
+    for i in range(4):
+        result.append(side)
+    return result
+
+simulate_distance = 8
+simulate_sectors = set()
+for x in range(-simulate_distance, simulate_distance + 1):
+    for y in range(-simulate_distance, simulate_distance + 1):
+        if x ** 2 + y ** 2 <= simulate_distance ** 2:
+            simulate_sectors.add((x, y))
+
+textures = {
+    'block.minecraft.nature.grass_block': tex_coords((1, 0), (0, 1), (0, 0)),
+    'block.minecraft.nature.dirt': tex_coords((0, 1), (0, 1), (0, 1)),
+    'block.minecraft.nature.bedrock': tex_coords((2, 1), (2, 1), (2, 1)),
+    'block.minecraft.nature.stone': tex_coords((2, 0), (2, 0), (2, 0)),
+    'block.minecraft.wood.oak_log': tex_coords((1, 2), (1, 2), (0, 2)),
+    'block.minecraft.wood.oak_leaves': tex_coords((2, 2), (2, 2), (2, 2)),
+}
+
+def enable_anisotropy(texture_target):
+    # 显式定义常量（如果 pyglet.gl 没提供）
+    GL_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE
+    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF
+
+    # 检查扩展支持
+    if not gl_info.have_extension('GL_EXT_texture_filter_anisotropic'):
+        return
+
+    # 使用 ctypes 定义接收变量
+    max_anisotropy = ctypes.c_float()
+
+    # 获取硬件支持的最大倍数
+    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, ctypes.byref(max_anisotropy))
+
+    # 设置当前绑定的纹理
+    # 建议手动设置一个值（如 4.0 或 8.0），或者使用获取到的最大值
+    level = max_anisotropy.value
+    glTexParameterf(texture_target, GL_TEXTURE_MAX_ANISOTROPY_EXT, level)
+
+texture = pyglet.image.load('./texture.png').get_texture()
+glBindTexture(texture.target, texture.id)
+# 限制 Mipmap 只生成/使用前几层，不让它缩到 1x1 那么小
+glTexParameteri(texture.target, GL_TEXTURE_MAX_LEVEL, 3)
+glGenerateMipmap(texture.target)
+# 开启各向异性过滤
+enable_anisotropy(texture.target)
+# 缩小过滤：在 Mipmap 层级间取差值，层级内也取最近
+glTexParameteri(texture.target, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR)
+# 放大过滤：依然保持最近邻，确保近处不模糊
+glTexParameteri(texture.target, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+group = pyglet.graphics.TextureGroup(texture)
+
+vertex_shader_code = '''
+#version 120
+varying vec2 v_tex_coords;
+varying float v_distance;
+void main() {
+    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+    v_tex_coords = gl_MultiTexCoord0.xy;
+    vec4 view_pos = gl_ModelViewMatrix * gl_Vertex;
+    v_distance = length(view_pos.xyz);
+}
+'''
+fragment_shader_code = '''
+#version 120
+varying vec2 v_tex_coords;
+varying float v_distance;
+uniform float u_render_distance;
+uniform sampler2D u_texture;
+void main() {
+    if (v_distance > u_render_distance)
+        discard;
+    vec4 color = texture2D(u_texture, v_tex_coords);
+    if (color.a < 0.5)
+        discard;
+    if (u_render_distance - v_distance < 16)
+    {
+        color = mix(vec4(0.5, 0.69, 1.0, 1.0), color, (u_render_distance - v_distance) / 16);
+    }
+    gl_FragColor = color;
+}
+'''
+
+class Shader:
+    def __init__(self, vert_code, frag_code):
+        self.program = glCreateProgram()
+
+        # 编译顶点着色器
+        self.vs = self.compile_shader(vert_code, GL_VERTEX_SHADER)
+        # 编译片段着色器
+        self.fs = self.compile_shader(frag_code, GL_FRAGMENT_SHADER)
+
+        glAttachShader(self.program, self.vs)
+        glAttachShader(self.program, self.fs)
+        glLinkProgram(self.program)
+
+        status = GLint()
+        glGetProgramiv(self.program, GL_LINK_STATUS, ctypes.byref(status))
+        if not status.value:
+            # 如果链接失败，获取错误日志
+            log_length = GLint()
+            glGetProgramiv(self.program, GL_INFO_LOG_LENGTH, ctypes.byref(log_length))
+            log = ctypes.create_string_buffer(log_length.value)
+            glGetProgramInfoLog(self.program, log_length, None, log)
+            print("Shader Link Error:")
+            print(log.value.decode())
+            raise RuntimeError("Shader linking failed.")
+
+        self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
+
+    def compile_shader(self, code, shader_type):
+        shader = glCreateShader(shader_type)
+        # 转换字符串为底层 C 指针
+        src = ctypes.create_string_buffer(code.encode('ascii'))
+        ptr = ctypes.cast(ctypes.pointer(src), ctypes.POINTER(ctypes.c_char))
+        glShaderSource(shader, 1, ctypes.byref(ptr), None)
+        glCompileShader(shader)
+        status = GLint()
+        glGetShaderiv(shader, GL_COMPILE_STATUS, ctypes.byref(status))
+        if not status.value:
+            log_length = GLint()
+            glGetShaderiv(shader, GL_INFO_LOG_LENGTH, ctypes.byref(log_length))
+            log = ctypes.create_string_buffer(log_length.value)
+            glGetShaderInfoLog(shader, log_length, None, log)
+            shader_name = "Vertex" if shader_type == GL_VERTEX_SHADER else "Fragment"
+            print(f"{shader_name} Shader Compile Error:\n{log.value.decode()}")
+            raise RuntimeError(f"{shader_name} compilation failed")
+        return shader
+
+    def bind(self, u_render_distance):
+        glUseProgram(self.program)
+        glUniform1f(self.u_render_distance_loc, u_render_distance)
+
+    def unbind(self):
+        glUseProgram(0)
+
+
+FACES = (
+    (0, 1, 0),
+    (0, -1, 0),
+    (-1, 0, 0),
+    (1, 0, 0),
+    (0, 0, 1),
+    (0, 0, -1),
+)
+
+def empty_update_func(self, x, y, z):
+    return False
+
+block_update_func = {
+    'block.minecraft.nature.grass_block': empty_update_func,
+    'block.minecraft.nature.dirt': empty_update_func,
+    'block.minecraft.nature.bedrock': empty_update_func,
+    'block.minecraft.nature.stone': empty_update_func,
+    'block.minecraft.wood.oak_log': empty_update_func,
+    'block.minecraft.wood.oak_leaves': empty_update_func,
+}
+
+def grass_block_random_tick_func(self, x, y, z):
+    if self.world.get_block(x, y + 1, z) != 1 and self.world.get_block(x, y + 1, z) != 0:
+        self.world.remove_block(x, y, z)
+        self.world.add_block(x, y, z, 'block.minecraft.nature.dirt')
+        return True
+    return False
+
+def dirt_random_tick_func(self, x, y, z):
+    for dy in (-1, 0, 1):
+        for dx, _, dz in FACES[2:]:
+            nx, ny, nz = x + dx, y + dy, z + dz
+            if (self.world.get_block(nx, ny, nz) == 2 and (self.world.get_block(x, y + 1, z) == 1 or self.world.get_block(x, y + 1, z) == 0)):
+                self.world.remove_block(x, y, z)
+                self.world.add_block(x, y, z, 'block.minecraft.nature.grass_block')
+                return True
+
+block_random_tick_func = {
+    'block.minecraft.nature.grass_block': grass_block_random_tick_func,
+    'block.minecraft.nature.dirt': dirt_random_tick_func,
+    'block.minecraft.nature.bedrock': empty_update_func,
+    'block.minecraft.nature.stone': empty_update_func,
+    'block.minecraft.wood.oak_log': empty_update_func,
+    'block.minecraft.wood.oak_leaves': empty_update_func,
+}
+
+
+class Window(pyglet.window.Window):
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        # 是否锁定鼠标
+        self.exclusive = False
+        # Strafing is moving lateral to the direction you are facing,
+        # e.g. moving to the left or right while continuing to face forward.
+        # First element is -1 when moving forward, 1 when moving back, and 0
+        # otherwise. The second element is -1 when moving left, 1 when moving
+        # right, and 0 otherwise.
+        # 按键
+        self.strafe = [0, 0]
+        self.position = (0, 80, 0)
+        self.flying = False
+        self.dy = 0
+        # First element is rotation of the player in the x-z plane (ground
+        # plane) measured from the z-axis down. The second is the rotation
+        # angle from the ground plane up. Rotation is in degrees.
+        #
+        # The vertical plane rotation ranges from -90 (looking straight down) to
+        # 90 (looking straight up). The horizontal rotation range is unbounded.
+        # 视线方向
+        self.rotation = (0, 0)
+        # 准星
+        self.reticle = None
+        self.render_distance = 8
+        self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
+        # 显示的方块，pyglet渲染对象
+        self.shown = {}
+        self.batch = pyglet.graphics.Batch()
+        # 按键
+        self.space = False
+        self.shift = False
+        self.control = False
+        self.shown_sectors = set()
+        self.loaded_sectors = set()
+        # 注册碰撞箱
+        self.world.add_block_entity_box('block.minecraft.nature.grass_block', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.nature.dirt', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.nature.bedrock', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.nature.stone', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.nature.stone', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.wood.oak_log', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.wood.oak_leaves', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_entity_entity_box('entity.minecraft.player', -0.3, 0.3, -0.5, 1.3, -0.3, 0.3)
+        # 注册透明方块
+        self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
+        # 着色器
+        self.shader = Shader(vertex_shader_code, fragment_shader_code)
+        # 函数字典
+        self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update}
+        # 更新玩家位置
+        pyglet.clock.schedule_interval(self.update, 1 / 60)
+        # 随机刻
+        pyglet.clock.schedule_interval(self.porcess_random_tick, 1 / gamerule['tick_per_second'])
+        # 创建处理区块的线程
+        self.world.start_process_sector_thread()
+
+    def update_shown(self, x, y, z):
+        vertex_data = cube_vertices(x, y, z, 0.5)
+        if (x, y, z) not in self.shown:
+            self.shown[(x, y, z)] = [0, {}]
+        shown = self.world.get_shown(x, y, z)
+        for i in range(64):
+            mask = 1 << i
+            if ((shown & mask) != (self.shown[(x, y, z)][0] & mask)):
+                if (self.shown[(x, y, z)][0] & mask):
+                    self.shown[(x, y, z)][1][i].delete()
+                    del self.shown[(x, y, z)][1][i]
+                else:
+                    self.shown[(x, y, z)][1][i] = self.batch.add(
+                        4, GL_QUADS, group,
+                        ('v3f/static', vertex_data[i]),
+                        ('t2f/static', textures[block_id[self.world.get_block(x, y, z)]][i])
+                    )
+        self.shown[(x, y, z)][0] = shown
+
+    def hide_block(self, x, y, z):
+        if (x, y, z) not in self.shown:
+            return
+        for i in self.shown[(x, y, z)][1]:
+            self.shown[(x, y, z)][1][i].delete()
+        del self.shown[(x, y, z)]
+
+    def block_update(self, x, y, z):
+        for dx, dy, dz in FACES:
+            nx, ny, nz = x + dx, y + dy, z + dz
+            block = self.world.get_block(nx, ny, nz)
+            if block != 1 and block != 0:
+                if block_update_func[block_id[block]](self, nx, ny, nz):
+                    self.world.add_operation("block_update", nx, ny, nz)
+
+    def porcess_random_tick(self, dt):
+        nx, ny = int(round(self.position[0])) // 16, int(round(self.position[2])) // 16
+        for dx, dy in simulate_sectors:
+            x, y = nx + dx, ny + dy
+            for _ in range(gamerule['random_tick_speed']):
+                sdx = random.randint(0, 15)
+                sdz = random.randint(0, 15)
+                sdy = random.randint(0, 127)
+                pos = (x * 16 + sdx, sdy, y * 16 + sdz)
+                if (self.world.get_block(*pos) != 1 and self.world.get_block(*pos) != 0):
+                    if block_random_tick_func[block_id[self.world.get_block(*pos)]](self, *pos):
+                        self.world.add_operation(f'block_update {pos[0]} {pos[1]} {pos[2]}')
+
+    def set_exclusive_mouse(self, exclusive):
+        """ If `exclusive` is True, the game will capture the mouse, if False
+        the game will ignore the mouse.
+        显示/隐藏鼠标
+
+        """
+        super().set_exclusive_mouse(exclusive)
+        self.exclusive = exclusive
+
+    def get_sight_vector(self):
+        """ Returns the current line of sight vector indicating the direction
+        the player is looking.
+        获取视线向量
+
+        """
+        x, y = self.rotation
+        # y ranges from -90 to 90, or -pi/2 to pi/2, so m ranges from 0 to 1 and
+        # is 1 when looking ahead parallel to the ground and 0 when looking
+        # straight up or down.
+        m = math.cos(math.radians(y))
+        # dy ranges from -1 to 1 and is -1 when looking straight down and 1 when
+        # looking straight up.
+        dy = math.sin(math.radians(y))
+        dx = math.cos(math.radians(x - 90)) * m
+        dz = math.sin(math.radians(x - 90)) * m
+        return (dx, dy, dz)
+
+    def get_motion_vector(self):
+        """ Returns the current motion vector indicating the velocity of the
+        player.
+
+        Returns
+        -------
+        vector : tuple of len 3
+            Tuple containing the velocity in x, y, and z respectively.
+        获取玩家移动向量
+
+        """
+        if any(self.strafe):
+            x, y = self.rotation
+            strafe = math.degrees(math.atan2(*self.strafe))
+            y_angle = math.radians(y)
+            x_angle = math.radians(x + strafe)
+            dy = 0.0
+            dx = math.cos(x_angle)
+            dz = math.sin(x_angle)
+        else:
+            dy = 0.0
+            dx = 0.0
+            dz = 0.0
+        if self.flying and self.space:
+            dy = 0.5
+        if self.flying and self.shift:
+            dy = -0.5
+        return (dx, dy, dz)
+
+    def process_queue(self):
+        start = time.perf_counter()
+        while time.perf_counter() - start < 1 / 60:
+            operation = self.world.give_operation()
+            if operation == 'None':
+                break
+            operation = operation.split(' ')
+            for i in range(1, len(operation)):
+                operation[i] = int(operation[i])
+            self.functions[operation[0]](*operation[1:])
+
+    def porcess_sectors(self, dt):
+        """ 处理区块的加载
+
+        """
+        nx, ny = int(round(self.position[0])) // 16, int(round(self.position[2])) // 16
+        for dx, dy in simulate_sectors:
+            x, y = nx + dx, ny + dy
+            if (x, y) not in self.loaded_sectors:
+                self.world.generate_sector_python(x, y)
+                self.loaded_sectors.add((x, y))
+                self.shown_sectors.add((x, y))
+        now_shown = set()
+        for dx, dy in simulate_sectors:
+            x, y = nx + dx, ny + dy
+            now_shown.add((x, y))
+        show = now_shown - self.shown_sectors
+        hide = self.shown_sectors - now_shown
+        for x, y in show:
+            blocks = self.world.get_sector_shown_blocks(x, y)
+            for block in blocks:
+                self.show_block(*block)
+            self.shown_sectors.add((x, y))
+        for x, y in hide:
+            blocks = self.world.get_sector_shown_blocks(x, y)
+            for block in blocks:
+                self.hide_block(*block)
+            self.shown_sectors.remove((x, y))
+
+    def update(self, dt):
+        """ This method is scheduled to be called repeatedly by the pyglet
+        clock.
+
+        Parameters
+        ----------
+        dt : float
+            The change in time since the last call.
+        循环调用，处理移动、C++传过来的操作(show_block)
+
+        """
+        if self.exclusive:
+            m = 16    # 数字越大，精度越高
+            dt = min(dt, 0.2)
+            for _ in range(m):
+                self._update(dt / m)
+            #world['main'].random_tick_update(self.position)
+            if self.space and self.dy == 0 and not self.flying:
+                self.dy = gamerule['jump_speed']
+        self.world.set_position(*self.position)
+        self.process_queue()
+
+    def _update(self, dt):
+        """ Private implementation of the `update()` method. This is where most
+        of the motion logic lives, along with gravity and collision detection.
+
+        Parameters
+        ----------
+        dt : float
+            The change in time since the last call.
+        处理移动
+
+        """
+        speed = 0
+        if self.flying and self.control:
+            speed = gamerule['fly_run_speed']
+        elif self.flying:
+            speed = gamerule['fly_speed']
+        elif self.control:
+            speed = gamerule['run_speed']
+        elif self.control and self.dy != 0:
+            speed = gamerule['run_jump_speed']
+        elif self.shift:
+            speed = gamerule['sneek_speed']
+        else:
+            speed = gamerule['walk_speed']
+        d = dt * speed
+        dx, dy, dz = self.get_motion_vector()
+        dx, dy, dz = dx * d, dy * d, dz * d
+        # 重力
+        if not self.flying:
+            # Update your vertical speed: if you are falling, speed up until you
+            # hit terminal velocity; if you are jumping, slow down until you
+            # start falling.
+            self.dy -= dt * gamerule['gravity']
+            # 阻力
+            self.dy *= (1 - 0.02 * dt)
+            #self.dy = max(self.dy, -gamerule['max_speed'])
+            dy += self.dy * dt
+        # 处理碰撞
+        x, y, z = self.position
+        y += dy
+        if self.world.intersect('entity.minecraft.player', x, y, z):
+            y -= dy
+            self.dy = 0
+        x += dx
+        if self.world.intersect('entity.minecraft.player', x, y, z):
+            x -= dx
+        z += dz
+        if self.world.intersect('entity.minecraft.player', x, y, z):
+            z -= dz
+        self.position = (x, y, z)
+
+    def on_mouse_press(self, x, y, button, modifiers):
+        """ Called when a mouse button is pressed. See pyglet docs for button
+        amd modifier mappings.
+
+        Parameters
+        ----------
+        x, y : int
+            The coordinates of the mouse click. Always center of the screen if
+            the mouse is captured.
+        button : int
+            Number representing mouse button that was clicked. 1 = left button,
+            4 = right button.
+        modifiers : int
+            Number representing any modifying keys that were pressed when the
+            mouse button was clicked.
+        处理鼠标点击
+
+        """
+        if self.exclusive:
+            dx, dy, dz = self.get_sight_vector()
+            x, y, z = self.position
+            y += 1.2
+            if self.shift and not self.flying:
+                y -= 0.5
+            block, previous = self.world.hit_test(x, y, z, dx, dy, dz, 5)
+            #print(block, previous)
+            if (button == mouse.RIGHT):
+                if previous:
+                    nx, ny, nz = previous
+                    self.world.add_block(nx, ny, nz, "block.minecraft.wood.oak_leaves")
+            elif button == pyglet.window.mouse.LEFT and block:
+                self.world.remove_block(*block)
+        else:
+            self.set_exclusive_mouse(True)
+
+    def on_mouse_motion(self, x, y, dx, dy):
+        """ Called when the player moves the mouse.
+
+        Parameters
+        ----------
+        x, y : int
+            The coordinates of the mouse click. Always center of the screen if
+            the mouse is captured.
+        dx, dy : float
+            The movement of the mouse.
+        处理鼠标移动
+
+        """
+        if self.exclusive:
+            m = 0.2
+            x, y = self.rotation
+            x, y = x + dx * m, y + dy * m
+            y = max(-90, min(90, y))
+            self.rotation = (x, y)
+
+    def on_key_press(self, symbol, modifiers):
+        """ Called when the player presses a key. See pyglet docs for key
+        mappings.
+
+        Parameters
+        ----------
+        symbol : int
+            Number representing the key that was pressed.
+        modifiers : int
+            Number representing any modifying keys that were pressed.
+        处理键盘事件
+
+        """
+        if symbol == key.W:
+            self.strafe[0] -= 1
+        elif symbol == key.S:
+            self.strafe[0] += 1
+        elif symbol == key.A:
+            self.strafe[1] -= 1
+        elif symbol == key.D:
+            self.strafe[1] += 1
+        elif symbol == key.SPACE:
+            self.space = True
+        elif symbol == key.LSHIFT:
+            self.shift = True
+        elif symbol == key.LCTRL:
+            self.control = True
+        elif symbol == key.ESCAPE:
+            self.set_exclusive_mouse(False)
+        elif symbol == key.TAB:
+            self.flying = not self.flying
+            self.dy = 0
+        elif symbol == key.G:
+            print(self.position)
+
+    def on_key_release(self, symbol, modifiers):
+        """ Called when the player releases a key. See pyglet docs for key
+        mappings.
+
+        Parameters
+        ----------
+        symbol : int
+            Number representing the key that was pressed.
+        modifiers : int
+            Number representing any modifying keys that were pressed.
+        处理键盘事件
+
+        """
+        if symbol == key.W:
+            self.strafe[0] += 1
+        elif symbol == key.S:
+            self.strafe[0] -= 1
+        elif symbol == key.A:
+            self.strafe[1] += 1
+        elif symbol == key.D:
+            self.strafe[1] -= 1
+        elif symbol == key.SPACE:
+            self.space = False
+        elif symbol == key.LSHIFT:
+            self.shift = False
+        elif symbol == key.LCTRL:
+            self.control = False
+
+    def on_resize(self, width, height):
+        """ Called when the window is resized to a new `width` and `height`.
+        窗口大小改变时调用
+
+        """
+        # label
+        # self.label.y = height - 10
+        # reticle
+        if self.reticle:
+            self.reticle.delete()
+        x, y = self.width // 2, self.height // 2
+        n = 12
+        self.reticle = pyglet.graphics.vertex_list(4,
+            ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n))
+        )
+
+    def set_2d(self):
+        """ Configure OpenGL to draw in 2d.
+
+        """
+        width, height = self.get_size()
+        glDisable(GL_DEPTH_TEST)
+        viewport = self.get_viewport_size()
+        glViewport(0, 0, max(1, viewport[0]), max(1, viewport[1]))
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, max(1, width), 0, max(1, height), -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+    def set_3d(self):
+        """ Configure OpenGL to draw in 3d.
+
+        """
+        width, height = self.get_size()
+        glEnable(GL_DEPTH_TEST)
+        viewport = self.get_viewport_size()
+        glViewport(0, 0, max(1, viewport[0]), max(1, viewport[1]))
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(100.0, width / float(height), 0.1, 16 * simulate_distance + 16)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        x, y = self.rotation
+        glRotatef(x, 0, 1, 0)
+        glRotatef(-y, math.cos(math.radians(x)), 0, math.sin(math.radians(x)))
+        x, y, z = self.position
+        y += 1.2
+        if self.shift and not self.flying:
+            y -= 0.5
+        glTranslatef(-x, -y, -z)
+        #glFogf(GL_FOG_START, (simulate_distance - 1.8) * 16)
+        #glFogf(GL_FOG_END, (simulate_distance - 0.5) * 16)
+
+    def on_draw(self):
+        """ Called by pyglet to draw the canvas.
+
+        """
+        self.clear()
+        self.set_3d()
+        glColor3d(1, 1, 1)
+        self.shader.bind(self.render_distance * 16 - 16)
+        self.batch.draw()
+        self.shader.unbind()
+        glDepthFunc(GL_LEQUAL)
+        self.draw_focused_block()
+        glDepthFunc(GL_LESS)
+        self.set_2d()
+        self.draw_reticle()
+
+    def draw_focused_block(self):
+        """ Draw black edges around the block that is currently under the
+        crosshairs.
+
+        """
+        dx, dy, dz = self.get_sight_vector()
+        x, y, z = self.position
+        y += 1.2
+        if self.shift and not self.flying:
+            y -= 0.5
+        block = self.world.hit_test(x, y, z, dx, dy, dz, 5)[0]
+        if block:
+            x, y, z = block
+            vertex_data = cube_vertices(x, y, z, 0.501)
+            glColor3d(0, 0, 0)
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
+            for i in vertex_data:
+                pyglet.graphics.draw(4, GL_QUADS, ('v3f', i))
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+
+    def draw_reticle(self):
+        """ Draw the crosshairs in the center of the screen.
+
+        """
+        glColor3d(0.4, 0.4, 0.4)
+        self.reticle.draw(GL_LINES)
+
+window = Window(width=960, height=540, caption='Minecraft', resizable=True)
+glClearColor(0.5, 0.69, 1.0, 1)
+glLineWidth(2.0)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+# Alpha-to-Coverage (最佳平衡点)
+glEnable(GL_MULTISAMPLE)
+glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE)
+# 启用Alpha混合
+glEnable(GL_BLEND)
+glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+def setup_fog():
+    """ Configure the OpenGL fog properties.
+
+    """
+    # Enable fog. Fog "blends a fog color with each rasterized pixel fragment's
+    # post-texturing color."
+    glEnable(GL_FOG)
+    # Set the fog color.
+    glFogfv(GL_FOG_COLOR, (GLfloat * 4)(0.5, 0.69, 1.0, 1))
+    # Say we have no preference between rendering speed and quality.
+    glHint(GL_FOG_HINT, GL_DONT_CARE)
+    # Specify the equation used to compute the blending factor.
+    glFogi(GL_FOG_MODE, GL_LINEAR)
+    # How close and far away fog starts and ends. The closer the start and end,
+    # the denser the fog in the fog range.
+    glFogf(GL_FOG_START, (simulate_distance - 2) * 16)
+    glFogf(GL_FOG_END, (simulate_distance - 1) * 16)
+#setup_fog()
+pyglet.app.run()
