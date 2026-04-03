@@ -190,6 +190,7 @@ struct World
 
     World(int seed_arg, int simulate_distance_arg)
     {
+        ++simulate_distance_arg;
         noise = FastNoise::New<FastNoise::Simplex>();
         seed = seed_arg;
         simulate_distance = simulate_distance_arg;
@@ -197,7 +198,6 @@ struct World
             for (int y = -simulate_distance; y <= simulate_distance; ++y)
                 if (x * x + y * y <= simulate_distance * simulate_distance)
                     simulate_sectors.insert({x, y});
-        --simulate_distance_arg;
         for (int x = -simulate_distance; x <= simulate_distance; ++x)
             for (int y = -simulate_distance; y <= simulate_distance; ++y)
             {

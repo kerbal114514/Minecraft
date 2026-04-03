@@ -2,6 +2,7 @@ import math
 import time
 import random
 import ctypes
+import os
 
 import pyglet
 from pyglet.gl import *
@@ -47,31 +48,6 @@ def cube_vertices(x, y, z, n):
         [x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n],  # back
     ]
 
-def tex_coord(x, y, n=4):
-    """ Return the bounding vertices of the texture square.
-    加载贴图
-
-    """
-    m = 1.0 / n
-    dx = x * m
-    dy = y * m
-    return dx, dy, dx + m, dy, dx + m, dy + m, dx, dy + m
-
-
-def tex_coords(top, bottom, side):
-    """ Return a list of the texture squares for the top, bottom and side.
-
-    """
-    top = tex_coord(*top)
-    bottom = tex_coord(*bottom)
-    side = tex_coord(*side)
-    result = []
-    result.append(top)
-    result.append(bottom)
-    for i in range(4):
-        result.append(side)
-    return result
-
 simulate_distance = 8
 simulate_sectors = set()
 for x in range(-simulate_distance, simulate_distance + 1):
@@ -79,78 +55,59 @@ for x in range(-simulate_distance, simulate_distance + 1):
         if x ** 2 + y ** 2 <= simulate_distance ** 2:
             simulate_sectors.add((x, y))
 
+images = [
+    "grass_block_top.png",    # 0
+    "grass_block_side.png",   # 1
+    "dirt.png",               # 2
+    "bedrock.png",            # 3
+    "stone.png",              # 4
+    "oak_log_top.png",        # 5
+    "oak_log_side.png",       # 6
+    "oak_leaves.png",         # 7
+]
 textures = {
-    'block.minecraft.nature.grass_block': tex_coords((1, 0), (0, 1), (0, 0)),
-    'block.minecraft.nature.dirt': tex_coords((0, 1), (0, 1), (0, 1)),
-    'block.minecraft.nature.bedrock': tex_coords((2, 1), (2, 1), (2, 1)),
-    'block.minecraft.nature.stone': tex_coords((2, 0), (2, 0), (2, 0)),
-    'block.minecraft.wood.oak_log': tex_coords((1, 2), (1, 2), (0, 2)),
-    'block.minecraft.wood.oak_leaves': tex_coords((2, 2), (2, 2), (2, 2)),
+    'block.minecraft.nature.grass_block': (0, 2, 1, 1, 1, 1),
+    'block.minecraft.nature.dirt': (2, 2, 2, 2, 2, 2),
+    'block.minecraft.nature.bedrock': (3, 3, 3, 3, 3, 3),
+    'block.minecraft.nature.stone': (4, 4, 4, 4, 4, 4),
+    'block.minecraft.wood.oak_log': (5, 5, 6, 6, 6, 6),
+    'block.minecraft.wood.oak_leaves': (7, 7, 7, 7, 7, 7),
 }
 
-def enable_anisotropy(texture_target):
-    # 显式定义常量（如果 pyglet.gl 没提供）
-    GL_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FE
-    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT = 0x84FF
+def create_texture_array(image_list, path='./Textures'):
+    width, height = 16, 16
+    layers = len(image_list)
 
-    # 检查扩展支持
-    if not gl_info.have_extension('GL_EXT_texture_filter_anisotropic'):
-        return
+    tex_id = GLuint()
+    glGenTextures(1, ctypes.byref(tex_id))
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex_id)
 
-    # 使用 ctypes 定义接收变量
-    max_anisotropy = ctypes.c_float()
+    # 预分配空间
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, width, height, layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
 
-    # 获取硬件支持的最大倍数
-    glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, ctypes.byref(max_anisotropy))
+    for i, img_name in enumerate(image_list):
+        img_path = os.path.join(path, img_name)
+        if os.path.exists(img_path):
+            img = pyglet.image.load(img_path)
+            data = img.get_data('RGBA', img.width * 4)
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data)
 
-    # 设置当前绑定的纹理
-    # 建议手动设置一个值（如 4.0 或 8.0），或者使用获取到的最大值
-    level = max_anisotropy.value
-    glTexParameterf(texture_target, GL_TEXTURE_MAX_ANISOTROPY_EXT, level)
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glGenerateMipmap(GL_TEXTURE_2D_ARRAY)
 
-texture = pyglet.image.load('./texture.png').get_texture()
-glBindTexture(texture.target, texture.id)
-# 限制 Mipmap 只生成/使用前几层，不让它缩到 1x1 那么小
-glTexParameteri(texture.target, GL_TEXTURE_MAX_LEVEL, 3)
-glGenerateMipmap(texture.target)
-# 开启各向异性过滤
-enable_anisotropy(texture.target)
-# 缩小过滤：在 Mipmap 层级间取差值，层级内也取最近
-glTexParameteri(texture.target, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR)
-# 放大过滤：依然保持最近邻，确保近处不模糊
-glTexParameteri(texture.target, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-group = pyglet.graphics.TextureGroup(texture)
+    return tex_id
 
-vertex_shader_code = '''
-#version 120
-varying vec2 v_tex_coords;
-varying float v_distance;
-void main() {
-    gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
-    v_tex_coords = gl_MultiTexCoord0.xy;
-    vec4 view_pos = gl_ModelViewMatrix * gl_Vertex;
-    v_distance = length(view_pos.xyz);
-}
-'''
-fragment_shader_code = '''
-#version 120
-varying vec2 v_tex_coords;
-varying float v_distance;
-uniform float u_render_distance;
-uniform sampler2D u_texture;
-void main() {
-    if (v_distance > u_render_distance)
-        discard;
-    vec4 color = texture2D(u_texture, v_tex_coords);
-    if (color.a < 0.5)
-        discard;
-    if (u_render_distance - v_distance < 16)
-    {
-        color = mix(vec4(0.5, 0.69, 1.0, 1.0), color, (u_render_distance - v_distance) / 16);
-    }
-    gl_FragColor = color;
-}
-'''
+tex_array_id = create_texture_array(images)
+
+def get_tex_array_data(block_name, face_index):
+    img_idx = textures[block_name][face_index]
+    uvs = [0,0, 1,0, 1,1, 0,1]
+    res = []
+    for i in range(0, 8, 2):
+        res.extend([uvs[i], uvs[i+1], float(img_idx)])
+    return res
+
 
 class Shader:
     def __init__(self, vert_code, frag_code):
@@ -177,8 +134,6 @@ class Shader:
             print(log.value.decode())
             raise RuntimeError("Shader linking failed.")
 
-        self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
-
     def compile_shader(self, code, shader_type):
         shader = glCreateShader(shader_type)
         # 转换字符串为底层 C 指针
@@ -198,12 +153,21 @@ class Shader:
             raise RuntimeError(f"{shader_name} compilation failed")
         return shader
 
-    def bind(self, u_render_distance):
+    def bind(self):
         glUseProgram(self.program)
-        glUniform1f(self.u_render_distance_loc, u_render_distance)
+
 
     def unbind(self):
         glUseProgram(0)
+
+class BlockShader(Shader):
+    def __init__(self, vert_code, frag_code):
+        super().__init__(vert_code, frag_code)
+        self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
+
+    def bind(self, u_render_distance):
+        super().bind()
+        glUniform1f(self.u_render_distance_loc, u_render_distance)
 
 
 FACES = (
@@ -252,6 +216,11 @@ block_random_tick_func = {
     'block.minecraft.wood.oak_leaves': empty_update_func,
 }
 
+with open("Shaders/block_vertex_shader.glsl") as f:
+    block_vertex_shader_code = f.read()
+with open("Shaders/block_fragment_shader.glsl") as f:
+    block_fragment_shader_code = f.read()
+
 
 class Window(pyglet.window.Window):
     def __init__(self, *args, **kw):
@@ -278,7 +247,7 @@ class Window(pyglet.window.Window):
         self.rotation = (0, 0)
         # 准星
         self.reticle = None
-        self.render_distance = 8
+        self.render_distance = simulate_distance
         self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
         # 显示的方块，pyglet渲染对象
         self.shown = {}
@@ -301,7 +270,7 @@ class Window(pyglet.window.Window):
         # 注册透明方块
         self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
         # 着色器
-        self.shader = Shader(vertex_shader_code, fragment_shader_code)
+        self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
         # 函数字典
         self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update}
         # 更新玩家位置
@@ -316,6 +285,7 @@ class Window(pyglet.window.Window):
         if (x, y, z) not in self.shown:
             self.shown[(x, y, z)] = [0, {}]
         shown = self.world.get_shown(x, y, z)
+        block_type = block_id[self.world.get_block(x, y, z)]
         for i in range(64):
             mask = 1 << i
             if ((shown & mask) != (self.shown[(x, y, z)][0] & mask)):
@@ -323,10 +293,11 @@ class Window(pyglet.window.Window):
                     self.shown[(x, y, z)][1][i].delete()
                     del self.shown[(x, y, z)][1][i]
                 else:
+                    tex_coords = get_tex_array_data(block_type, i)
                     self.shown[(x, y, z)][1][i] = self.batch.add(
-                        4, GL_QUADS, group,
+                        4, GL_QUADS, None,
                         ('v3f/static', vertex_data[i]),
-                        ('t2f/static', textures[block_id[self.world.get_block(x, y, z)]][i])
+                        ('t3f/static', tex_coords)
                     )
         self.shown[(x, y, z)][0] = shown
 
@@ -684,7 +655,7 @@ class Window(pyglet.window.Window):
         glViewport(0, 0, max(1, viewport[0]), max(1, viewport[1]))
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(100.0, width / float(height), 0.1, 16 * simulate_distance + 16)
+        gluPerspective(100.0, width / float(height), 0.05, 16 * self.render_distance + 16)
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         x, y = self.rotation
@@ -695,8 +666,6 @@ class Window(pyglet.window.Window):
         if self.shift and not self.flying:
             y -= 0.5
         glTranslatef(-x, -y, -z)
-        #glFogf(GL_FOG_START, (simulate_distance - 1.8) * 16)
-        #glFogf(GL_FOG_END, (simulate_distance - 0.5) * 16)
 
     def on_draw(self):
         """ Called by pyglet to draw the canvas.
@@ -704,10 +673,12 @@ class Window(pyglet.window.Window):
         """
         self.clear()
         self.set_3d()
-        glColor3d(1, 1, 1)
-        self.shader.bind(self.render_distance * 16 - 16)
+        # 绑定纹理
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
+        self.block_shader.bind(self.render_distance * 16 - 16)
         self.batch.draw()
-        self.shader.unbind()
+        self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()
         glDepthFunc(GL_LESS)
