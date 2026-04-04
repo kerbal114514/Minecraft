@@ -4,6 +4,7 @@ import random
 import ctypes
 import os
 
+import numpy as np
 import pyglet
 from pyglet.gl import *
 from pyglet.window import key, mouse
@@ -87,10 +88,9 @@ def create_texture_array(image_list, path='./Textures'):
 
     for i, img_name in enumerate(image_list):
         img_path = os.path.join(path, img_name)
-        if os.path.exists(img_path):
-            img = pyglet.image.load(img_path)
-            data = img.get_data('RGBA', img.width * 4)
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data)
+        img = pyglet.image.load(img_path)
+        data = img.get_data('RGBA', img.width * 4)
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE, data)
 
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR)
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
@@ -98,7 +98,24 @@ def create_texture_array(image_list, path='./Textures'):
 
     return tex_id
 
+def replace_mipmap(tex_id, layer, level, img_name):
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tex_id)
+    img_path = os.path.join("./Textures", img_name)
+    img = pyglet.image.load(img_path)
+    data = img.get_data('RGBA', img.width * 4)
+    glTexSubImage3D(
+        GL_TEXTURE_2D_ARRAY,
+        level,
+        0, 0, layer,
+        16 // (2 ** level), 16 // (2 ** level), 1,
+        GL_RGBA, GL_UNSIGNED_BYTE, data
+    )
+
 tex_array_id = create_texture_array(images)
+replace_mipmap(tex_array_id, 7, 1, "oak_leaves_mipmap_1.png")
+replace_mipmap(tex_array_id, 7, 2, "oak_leaves_mipmap_2.png")
+replace_mipmap(tex_array_id, 7, 3, "oak_leaves_mipmap_3.png")
+replace_mipmap(tex_array_id, 7, 4, "oak_leaves_mipmap_4.png")
 
 def get_tex_array_data(block_name, face_index):
     img_idx = textures[block_name][face_index]
@@ -715,30 +732,7 @@ class Window(pyglet.window.Window):
 window = Window(width=960, height=540, caption='Minecraft', resizable=True)
 glClearColor(0.5, 0.69, 1.0, 1)
 glLineWidth(2.0)
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST)
-glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-# Alpha-to-Coverage (最佳平衡点)
-glEnable(GL_MULTISAMPLE)
-glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE)
 # 启用Alpha混合
 glEnable(GL_BLEND)
 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-def setup_fog():
-    """ Configure the OpenGL fog properties.
-
-    """
-    # Enable fog. Fog "blends a fog color with each rasterized pixel fragment's
-    # post-texturing color."
-    glEnable(GL_FOG)
-    # Set the fog color.
-    glFogfv(GL_FOG_COLOR, (GLfloat * 4)(0.5, 0.69, 1.0, 1))
-    # Say we have no preference between rendering speed and quality.
-    glHint(GL_FOG_HINT, GL_DONT_CARE)
-    # Specify the equation used to compute the blending factor.
-    glFogi(GL_FOG_MODE, GL_LINEAR)
-    # How close and far away fog starts and ends. The closer the start and end,
-    # the denser the fog in the fog range.
-    glFogf(GL_FOG_START, (simulate_distance - 2) * 16)
-    glFogf(GL_FOG_END, (simulate_distance - 1) * 16)
-#setup_fog()
 pyglet.app.run()
