@@ -3,6 +3,8 @@ import time
 import random
 import ctypes
 import os
+import sys
+import importlib
 
 import numpy as np
 import pyglet
@@ -10,6 +12,9 @@ from pyglet.gl import *
 from pyglet.window import key, mouse
 
 from MCworld import World
+
+sys.path.append('./codes/')
+Button = getattr(importlib.import_module('PygletButton'), 'Button')
 
 block_id = [
     "block.minecraft.dev.sector_not_loaded",
@@ -264,6 +269,7 @@ class Window(pyglet.window.Window):
         self.rotation = (0, 0)
         # 准星
         self.reticle = None
+        self.escape_menu_shade = None
         self.render_distance = simulate_distance
         self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
         # 显示的方块，pyglet渲染对象
@@ -284,6 +290,19 @@ class Window(pyglet.window.Window):
         self.world.add_block_entity_box('block.minecraft.wood.oak_log', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_block_entity_box('block.minecraft.wood.oak_leaves', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_entity_entity_box('entity.minecraft.player', -0.3, 0.3, -0.5, 1.3, -0.3, 0.3)
+        # 决定渲染哪些东西
+        self.level = 'escape_menu'
+        # 所有按钮
+        self.mouse_position = (-1, -1)
+        self.buttons = {
+            'escape_menu.resume_game': Button(0, 0, 480, 40, 'Resume game', (50, 50, 50, 255), (100, 100, 200, 255), (255, 255, 255, 255), self.resume_game),
+            'escape_menu.save_and_return': Button(0, 0, 480, 40, 'Save and return to the main menu', (50, 50, 50, 255), (100, 100, 200, 255), (255, 255, 255, 255), self.save_and_return),
+        }
+        # 按钮相对于窗口中心的偏移量，用于on_resize
+        self.buttons_offset = {
+            'escape_menu.resume_game': (0, 64),
+            'escape_menu.save_and_return': (0, -64),
+        }
         # 注册透明方块
         self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
         # 着色器
@@ -296,6 +315,13 @@ class Window(pyglet.window.Window):
         pyglet.clock.schedule_interval(self.porcess_random_tick, 1 / gamerule['tick_per_second'])
         # 创建处理区块的线程
         self.world.start_process_sector_thread()
+
+    def resume_game(self):
+        self.set_exclusive_mouse(True)
+        self.level = 'normal'
+
+    def save_and_return(self):
+        self.on_close()
 
     def update_shown(self, x, y, z):
         vertex_data = cube_vertices(x, y, z, 0.5)
@@ -532,6 +558,13 @@ class Window(pyglet.window.Window):
         处理鼠标点击
 
         """
+        for key in self.buttons:
+            origin_key = key
+            key = key.split('.')
+            key.pop()
+            key = '.'.join(key)
+            if (self.level == key):
+                self.buttons[origin_key].on_mouse_press(x, y, button, modifiers)
         if self.exclusive:
             dx, dy, dz = self.get_sight_vector()
             x, y, z = self.position
@@ -546,8 +579,6 @@ class Window(pyglet.window.Window):
                     self.world.add_block(nx, ny, nz, "block.minecraft.wood.oak_leaves")
             elif button == pyglet.window.mouse.LEFT and block:
                 self.world.remove_block(*block)
-        else:
-            self.set_exclusive_mouse(True)
 
     def on_mouse_motion(self, x, y, dx, dy):
         """ Called when the player moves the mouse.
@@ -562,6 +593,7 @@ class Window(pyglet.window.Window):
         处理鼠标移动
 
         """
+        self.mouse_position = (x, y)
         if self.exclusive:
             m = 0.2
             x, y = self.rotation
@@ -597,7 +629,12 @@ class Window(pyglet.window.Window):
         elif symbol == key.LCTRL:
             self.control = True
         elif symbol == key.ESCAPE:
-            self.set_exclusive_mouse(False)
+            if self.level == 'normal':
+                self.set_exclusive_mouse(False)
+                self.level = 'escape_menu'
+            elif self.level == 'escape_menu':
+                self.set_exclusive_mouse(True)
+                self.level = 'normal'
         elif symbol == key.TAB:
             self.flying = not self.flying
             self.dy = 0
@@ -632,6 +669,10 @@ class Window(pyglet.window.Window):
         elif symbol == key.LCTRL:
             self.control = False
 
+    def on_close(self):
+        del self.world
+        self.close()
+
     def on_resize(self, width, height):
         """ Called when the window is resized to a new `width` and `height`.
         窗口大小改变时调用
@@ -647,6 +688,14 @@ class Window(pyglet.window.Window):
         self.reticle = pyglet.graphics.vertex_list(4,
             ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n))
         )
+        if self.escape_menu_shade:
+            self.escape_menu_shade.delete()
+        self.escape_menu_shade = pyglet.graphics.vertex_list(4,
+            ('v2i', (0, 0, width, 0, width, height, 0, height)),
+            ('c4B', (0, 0, 0, 128) * 4)
+        )
+        for key in self.buttons:
+            self.buttons[key].replace(width // 2 + self.buttons_offset[key][0], height // 2 + self.buttons_offset[key][1])
 
     def set_2d(self):
         """ Configure OpenGL to draw in 2d.
@@ -701,6 +750,15 @@ class Window(pyglet.window.Window):
         glDepthFunc(GL_LESS)
         self.set_2d()
         self.draw_reticle()
+        if self.level == 'escape_menu':
+            self.escape_menu_shade.draw(GL_QUADS)
+        for key in self.buttons:
+            origin_key = key
+            key = key.split('.')
+            key.pop()
+            key = '.'.join(key)
+            if (self.level == key):
+                self.buttons[origin_key].draw(self.mouse_position)
 
     def draw_focused_block(self):
         """ Draw black edges around the block that is currently under the
