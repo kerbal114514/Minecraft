@@ -273,7 +273,7 @@ class Window(pyglet.window.Window):
         self.strafe = [0, 0]
         self.position = (0, 80, 0)
         self.flying = False
-        self.dy = 0
+        self.delta = [0, 0, 0]
         # First element is rotation of the player in the x-z plane (ground
         # plane) measured from the z-axis down. The second is the rotation
         # angle from the ground plane up. Rotation is in degrees.
@@ -499,8 +499,8 @@ class Window(pyglet.window.Window):
             dt = min(dt, 0.2)
             for _ in range(m):
                 self._update(dt / m)
-            if self.space and self.dy == 0 and not self.flying:
-                self.dy = gamerule['jump_speed']
+            if self.space and self.delta[1] == 0 and not self.flying:
+                self.delta[1] = gamerule['jump_speed']
         self.world.set_position(*self.position)
         self.process_queue()
 
@@ -522,37 +522,49 @@ class Window(pyglet.window.Window):
             speed = gamerule['fly_speed']
         elif self.control:
             speed = gamerule['run_speed']
-        elif self.control and self.dy != 0:
+        elif self.control and self.delta[1] != 0:
             speed = gamerule['run_jump_speed']
         elif self.shift:
             speed = gamerule['sneek_speed']
         else:
             speed = gamerule['walk_speed']
-        d = dt * speed
+        # 摩擦系数
+        m = 3 if self.flying or self.delta[1] else 15
+        d = dt * speed * m
         dx, dy, dz = self.get_motion_vector()
-        dx, dy, dz = dx * d, dy * d, dz * d
+        dx, dz = dx * d + self.delta[0], dz * d + self.delta[2]
+        if self.flying:
+            dy = dy * d / m * 15 + self.delta[1]
+        else:
+            dy = dy * d + self.delta[1]
+        dx, dz = dx * (1 - dt * m) , dz * (1 - dt * m)
+        self.delta = [dx, dy, dz]
         # 重力
         if not self.flying:
             # Update your vertical speed: if you are falling, speed up until you
             # hit terminal velocity; if you are jumping, slow down until you
             # start falling.
-            self.dy -= dt * gamerule['gravity']
+            self.delta[1] -= dt * gamerule['gravity']
             # 阻力
-            self.dy *= (1 - 0.02 * dt)
-            #self.dy = max(self.dy, -gamerule['max_speed'])
-            dy += self.dy * dt
+            self.delta[1] *= (1 - 0.02 * dt)
+            #self.delta[1] = max(self.delta[1], -gamerule['max_speed'])
+        else:
+            # 阻力
+            self.delta[1] *= (1 - dt * 15)
         # 处理碰撞
         x, y, z = self.position
-        y += dy
+        y += self.delta[1] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
-            y -= dy
-            self.dy = 0
-        x += dx
+            y -= self.delta[1] * dt
+            self.delta[1] = 0
+        x += self.delta[0] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
-            x -= dx
-        z += dz
+            x -= self.delta[0] * dt
+            self.delta[0] = 0
+        z += self.delta[2] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
-            z -= dz
+            z -= self.delta[2] * dt
+            self.delta[2] = 0
         self.position = (x, y, z)
 
     def on_mouse_press(self, x, y, button, modifiers):
@@ -652,7 +664,7 @@ class Window(pyglet.window.Window):
                 self.level = 'normal'
         elif symbol == key.TAB:
             self.flying = not self.flying
-            self.dy = 0
+            self.delta[1] = 0
         elif symbol == key.G:
             print(self.position)
 
@@ -793,7 +805,7 @@ class Window(pyglet.window.Window):
         block = self.world.hit_test(x, y, z, dx, dy, dz, 5)[0]
         if block:
             x, y, z = block
-            vertex_data = cube_vertices(x, y, z, 0.5)
+            vertex_data = cube_vertices(x, y, z, 0.501)
             glColor3d(0, 0, 0)
             for i in vertex_data:
                 pyglet.graphics.draw(4, GL_LINE_LOOP, ('v3f', i))
