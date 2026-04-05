@@ -820,10 +820,16 @@ class Window(pyglet.window.Window):
         """ 绘制天空盒
 
         """
-        vertex = cube_vertices(*self.position, 16)
+        vertex = []
+        x, y, z = self.position
+        for i in range(0, 360):
+            x1, z1 = math.cos(math.radians(i)) * 16 + x, math.sin(math.radians(i)) * 16 + z
+            x2, z2 = math.cos(math.radians(i + 1)) * 16 + x, math.sin(math.radians(i + 1)) * 16 + z
+            vertex.extend((x1, y - 16, z1, x1, y + 16, z1, x2, y + 16, z2, x2, y - 16, z2))
+        vertex.extend((x - 16, y - 16, z - 16, x - 16, y - 16, z + 16, x + 16, y - 16, z + 16, x + 16, y - 16, z - 16))
+        vertex.extend((x - 16, y + 16, z - 16, x - 16, y + 16, z + 16, x + 16, y + 16, z + 16, x + 16, y + 16, z - 16))
         self.skybox_shader.bind(self.position)
-        for i in vertex:
-            pyglet.graphics.draw(4, GL_QUADS, ('v3f', i))
+        pyglet.graphics.draw(len(vertex) // 3, GL_QUADS, ('v3f', vertex))
         self.skybox_shader.unbind()
 
 window = Window(width=960, height=540, caption='Minecraft', resizable=True)
