@@ -93,10 +93,8 @@ struct Sector
 {
     Block* blocks;
     int* data;
-    vector<bool> trees;    // 所有不能生成树（两棵树距离过近）的位置为true，用vector压缩bool
     Sector()
     {
-        trees = vector<bool>(16 * 16, false);
         blocks = new Block[16 * 128 * 16];    // (x, y, z)为blocks[x * 16 * 128 + y * 16 + z]
         data = new int[16 * 16];    // (x, z)为data[x * 16 + z]
         fill(blocks, blocks + 16 * 128 * 16, air);
@@ -439,24 +437,20 @@ struct World
                 set_shown(x, y, z, exposed(x, y, z));
     }
 
-    inline bool has_tree(int x, int z)
+    bool has_tree(int x, int z)
     {
-        int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
-        int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
-        if (world[{sector_x, sector_y}]->trees[(x % 16 + 16) % 16 * 16 + (z % 16 + 16) % 16] || hash2D(x, z, seed) < 0.99)
+        float hash = hash2D(x, z, seed);
+        if (hash <= 0.99)
             return false;
-        return true;
-    }
-
-    inline void set_has_tree(int nx, int nz)
-    {
-        for (int dx = -5, x, z; dx <= 5; ++dx)
+        for (int dx = -5; dx <= 5; ++dx)
             for (int dz = -5; dz <= 5; ++dz)
-                if (dx * dx + dz * dz <= 25)
-                {
-                    x = nx + dx, z = nz + dz;
-                    world[{(x >= 0) ? (x / 16) : ((x - 15) / 16), (z >= 0) ? (z / 16) : ((z - 15) / 16)}]->trees[(x % 16 + 16) % 16 * 16 + (z % 16 + 16) % 16] = true;
-                }
+            {
+                if (dx == 0 && dz == 0)
+                    continue;
+                if (dx * dx + dz * dz <= 25 && hash2D(x + dx, z + dz, seed) >= hash)
+                    return false;
+            }
+        return true;
     }
 
     void decorate_sector(int sx, int sy)
@@ -471,7 +465,6 @@ struct World
                 y = sector->data[x * 16 + z];
                 if (has_tree(sx * 16 + x, sy * 16 + z))
                 {
-                    set_has_tree(sx * 16 + x, sy * 16 + z);
                     for (int dy = 1; dy < 6; ++dy)
                     {
                         block = find_block(sx * 16 + x, y + dy, sy * 16 + z);
