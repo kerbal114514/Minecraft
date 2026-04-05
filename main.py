@@ -186,10 +186,21 @@ class BlockShader(Shader):
     def __init__(self, vert_code, frag_code):
         super().__init__(vert_code, frag_code)
         self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
+        self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
 
-    def bind(self, u_render_distance):
+    def bind(self, u_render_distance, u_position):
         super().bind()
         glUniform1f(self.u_render_distance_loc, u_render_distance)
+        glUniform3f(self.u_position_loc, *u_position)
+
+class SkyboxShader(Shader):
+    def __init__(self, vert_code, frag_code):
+        super().__init__(vert_code, frag_code)
+        self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
+
+    def bind(self, u_position):
+        super().bind()
+        glUniform3f(self.u_position_loc, *u_position)
 
 
 FACES = (
@@ -242,6 +253,10 @@ with open("Shaders/block_vertex_shader.glsl") as f:
     block_vertex_shader_code = f.read()
 with open("Shaders/block_fragment_shader.glsl") as f:
     block_fragment_shader_code = f.read()
+with open("Shaders/skybox_vertex_shader.glsl") as f:
+    skybox_vertex_shader_code = f.read()
+with open("Shaders/skybox_fragment_shader.glsl") as f:
+    skybox_fragment_shader_code = f.read()
 
 
 class Window(pyglet.window.Window):
@@ -295,8 +310,8 @@ class Window(pyglet.window.Window):
         # 所有按钮
         self.mouse_position = (-1, -1)
         self.buttons = {
-            'escape_menu.resume_game': Button(0, 0, 480, 40, 'Resume game', (50, 50, 50, 255), (100, 100, 200, 255), (255, 255, 255, 255), self.resume_game),
-            'escape_menu.save_and_return': Button(0, 0, 480, 40, 'Save and return to the main menu', (50, 50, 50, 255), (100, 100, 200, 255), (255, 255, 255, 255), self.save_and_return),
+            'escape_menu.resume_game': Button(0, 0, 480, 40, 'Resume game', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), self.resume_game),
+            'escape_menu.save_and_return': Button(0, 0, 480, 40, 'Save and return to the main menu', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), self.save_and_return),
         }
         # 按钮相对于窗口中心的偏移量，用于on_resize
         self.buttons_offset = {
@@ -307,6 +322,7 @@ class Window(pyglet.window.Window):
         self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
         # 着色器
         self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
+        self.skybox_shader = SkyboxShader(skybox_vertex_shader_code, skybox_fragment_shader_code)
         # 函数字典
         self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update}
         # 更新玩家位置
@@ -686,7 +702,8 @@ class Window(pyglet.window.Window):
         x, y = self.width // 2, self.height // 2
         n = 12
         self.reticle = pyglet.graphics.vertex_list(4,
-            ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n))
+            ('v2i', (x - n, y, x + n, y, x, y - n, x, y + n)),
+            ('c4B', (100, 100, 100, 255) * 4)
         )
         if self.escape_menu_shade:
             self.escape_menu_shade.delete()
@@ -739,17 +756,21 @@ class Window(pyglet.window.Window):
         """
         self.clear()
         self.set_3d()
+        # 绘制天空
+        glDepthMask(GL_FALSE)
+        self.draw_sky()
+        glDepthMask(GL_TRUE)
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
-        self.block_shader.bind(self.render_distance * 16 - 16)
+        self.block_shader.bind(self.render_distance * 16 - 16, self.position)
         self.batch.draw()
         self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()
         glDepthFunc(GL_LESS)
         self.set_2d()
-        self.draw_reticle()
+        self.reticle.draw(GL_LINES)
         if self.level == 'escape_menu':
             self.escape_menu_shade.draw(GL_QUADS)
         for key in self.buttons:
@@ -773,22 +794,22 @@ class Window(pyglet.window.Window):
         block = self.world.hit_test(x, y, z, dx, dy, dz, 5)[0]
         if block:
             x, y, z = block
-            vertex_data = cube_vertices(x, y, z, 0.501)
+            vertex_data = cube_vertices(x, y, z, 0.5)
             glColor3d(0, 0, 0)
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE)
             for i in vertex_data:
-                pyglet.graphics.draw(4, GL_QUADS, ('v3f', i))
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
+                pyglet.graphics.draw(4, GL_LINE_LOOP, ('v3f', i))
 
-    def draw_reticle(self):
-        """ Draw the crosshairs in the center of the screen.
+    def draw_sky(self):
+        """ 绘制天空盒
 
         """
-        glColor3d(0.4, 0.4, 0.4)
-        self.reticle.draw(GL_LINES)
+        vertex = cube_vertices(*self.position, 16)
+        self.skybox_shader.bind(self.position)
+        for i in vertex:
+            pyglet.graphics.draw(4, GL_QUADS, ('v3f', i))
+        self.skybox_shader.unbind()
 
 window = Window(width=960, height=540, caption='Minecraft', resizable=True)
-glClearColor(0.5, 0.69, 1.0, 1)
 glLineWidth(2.0)
 # 启用Alpha混合
 glEnable(GL_BLEND)
