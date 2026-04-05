@@ -446,7 +446,7 @@ class Window(pyglet.window.Window):
 
     def process_queue(self):
         start = time.perf_counter()
-        while time.perf_counter() - start < 1 / 60:
+        while time.perf_counter() - start < 1 / gamerule['tick_per_second'] / 2:
             operation = self.world.give_operation()
             if operation == 'None':
                 break
@@ -499,7 +499,6 @@ class Window(pyglet.window.Window):
             dt = min(dt, 0.2)
             for _ in range(m):
                 self._update(dt / m)
-            #world['main'].random_tick_update(self.position)
             if self.space and self.dy == 0 and not self.flying:
                 self.dy = gamerule['jump_speed']
         self.world.set_position(*self.position)
