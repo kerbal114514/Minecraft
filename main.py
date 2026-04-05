@@ -561,8 +561,14 @@ class Window(pyglet.window.Window):
         if self.world.intersect('entity.minecraft.player', x, y, z):
             x -= self.delta[0] * dt
             self.delta[0] = 0
+        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.05, z)):
+            x -= self.delta[0] * dt
+            self.delta[0] = 0
         z += self.delta[2] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
+            z -= self.delta[2] * dt
+            self.delta[2] = 0
+        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.05, z)):
             z -= self.delta[2] * dt
             self.delta[2] = 0
         self.position = (x, y, z)
