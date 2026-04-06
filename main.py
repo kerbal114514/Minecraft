@@ -38,7 +38,7 @@ gamerule = {
     'fly_run_speed': 22,
     'gravity': 32,
     'jump_speed': 8.85,
-    'max_speed': 64.0,
+    'terminal_speed': 78.4,
 }
 
 def cube_vertices(x, y, z, n):
@@ -249,6 +249,17 @@ block_random_tick_func = {
     'block.minecraft.wood.oak_leaves': empty_update_func,
 }
 
+block_friction = {    # 摩擦系数
+    'block.minecraft.dev.air': 3,
+    'block.minecraft.dev.sector_not_loaded': 3,
+    'block.minecraft.nature.grass_block': 15,
+    'block.minecraft.nature.dirt': 15,
+    'block.minecraft.nature.bedrock': 15,
+    'block.minecraft.nature.stone': 15,
+    'block.minecraft.wood.oak_log': 15,
+    'block.minecraft.wood.oak_leaves': 15,
+}
+
 with open("Shaders/block_vertex_shader.glsl") as f:
     block_vertex_shader_code = f.read()
 with open("Shaders/block_fragment_shader.glsl") as f:
@@ -292,6 +303,7 @@ class Window(pyglet.window.Window):
         self.batch = pyglet.graphics.Batch()
         # 按键
         self.space = False
+        self.last_space_press = -1
         self.shift = False
         self.control = False
         self.shown_sectors = set()
@@ -494,13 +506,14 @@ class Window(pyglet.window.Window):
         循环调用，处理移动、C++传过来的操作(show_block)
 
         """
+        x, y, z = self.position
         if self.exclusive:
             m = 16    # 数字越大，精度越高
             dt = min(dt, 0.2)
+            if self.space and self.world.intersect('entity.minecraft.player', x, y - 0.001, z) and not self.flying:
+                self.delta[1] = gamerule['jump_speed']
             for _ in range(m):
                 self._update(dt / m)
-            if self.space and self.delta[1] == 0 and not self.flying:
-                self.delta[1] = gamerule['jump_speed']
         self.world.set_position(*self.position)
         self.process_queue()
 
@@ -529,7 +542,7 @@ class Window(pyglet.window.Window):
         else:
             speed = gamerule['walk_speed']
         # 摩擦系数
-        m = 3 if self.flying or self.delta[1] else 15
+        m = self.get_friction()
         d = dt * speed * m
         dx, dy, dz = self.get_motion_vector()
         dx, dz = dx * d + self.delta[0], dz * d + self.delta[2]
@@ -546,32 +559,50 @@ class Window(pyglet.window.Window):
             # start falling.
             self.delta[1] -= dt * gamerule['gravity']
             # 阻力
-            self.delta[1] *= (1 - 0.02 * dt)
+            self.delta[1] *= (1 - (gamerule['gravity'] / gamerule['terminal_speed']) * dt)
             #self.delta[1] = max(self.delta[1], -gamerule['max_speed'])
         else:
             # 阻力
             self.delta[1] *= (1 - dt * 15)
+        if abs(self.delta[0]) < 0.001:
+            self.delta[0] = 0
+        if abs(self.delta[1]) < 0.001:
+            self.delta[1] = 0
+        if abs(self.delta[2]) < 0.001:
+            self.delta[2] = 0
         # 处理碰撞
         x, y, z = self.position
         y += self.delta[1] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
             y -= self.delta[1] * dt
             self.delta[1] = 0
+        if self.flying and self.world.intersect('entity.minecraft.player', x, y - 0.001, z):
+            self.flying = False
         x += self.delta[0] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
             x -= self.delta[0] * dt
             self.delta[0] = 0
-        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.05, z)):
+        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.001, z)):
             x -= self.delta[0] * dt
             self.delta[0] = 0
         z += self.delta[2] * dt
         if self.world.intersect('entity.minecraft.player', x, y, z):
             z -= self.delta[2] * dt
             self.delta[2] = 0
-        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.05, z)):
+        elif self.shift and (not self.flying) and (not self.world.intersect('entity.minecraft.player', x, y - 0.001, z)):
             z -= self.delta[2] * dt
             self.delta[2] = 0
         self.position = (x, y, z)
+
+    def get_friction(self):
+        """获取摩擦系数
+
+        """
+        x, y, z = self.position
+        max_friction = 0
+        for dx, dz in ((-0.3, -0.3), (0.3, 0.3), (-0.3, 0.3), (0.3, -0.3), (0, 0)):
+            max_friction = max(max_friction, block_friction[block_id[self.world.get_block(int(round(x + dx)), int(round(y - 0.55)), int(round(z + dz)))]])
+        return max_friction
 
     def on_mouse_press(self, x, y, button, modifiers):
         """ Called when a mouse button is pressed. See pyglet docs for button
@@ -591,13 +622,6 @@ class Window(pyglet.window.Window):
         处理鼠标点击
 
         """
-        for key in self.buttons:
-            origin_key = key
-            key = key.split('.')
-            key.pop()
-            key = '.'.join(key)
-            if (self.level == key):
-                self.buttons[origin_key].on_mouse_press(x, y, button, modifiers)
         if self.exclusive:
             dx, dy, dz = self.get_sight_vector()
             x, y, z = self.position
@@ -612,6 +636,13 @@ class Window(pyglet.window.Window):
                     self.world.add_block(nx, ny, nz, "block.minecraft.wood.oak_leaves")
             elif button == pyglet.window.mouse.LEFT and block:
                 self.world.remove_block(*block)
+        for key in self.buttons:
+            origin_key = key
+            key = key.split('.')
+            key.pop()
+            key = '.'.join(key)
+            if (self.level == key):
+                self.buttons[origin_key].on_mouse_press(x, y, button, modifiers)
 
     def on_mouse_motion(self, x, y, dx, dy):
         """ Called when the player moves the mouse.
@@ -657,6 +688,11 @@ class Window(pyglet.window.Window):
             self.strafe[1] += 1
         elif symbol == key.SPACE:
             self.space = True
+            this_space_press = time.perf_counter()
+            if this_space_press - self.last_space_press < 0.3:
+                self.flying = not self.flying
+                self.delta[1] = 0
+            self.last_space_press = this_space_press
         elif symbol == key.LSHIFT:
             self.shift = True
         elif symbol == key.LCTRL:
@@ -668,11 +704,8 @@ class Window(pyglet.window.Window):
             elif self.level == 'escape_menu':
                 self.set_exclusive_mouse(True)
                 self.level = 'normal'
-        elif symbol == key.TAB:
-            self.flying = not self.flying
-            self.delta[1] = 0
         elif symbol == key.G:
-            print(self.position)
+            print(self.position, self.delta)
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -730,6 +763,11 @@ class Window(pyglet.window.Window):
         )
         for key in self.buttons:
             self.buttons[key].replace(width // 2 + self.buttons_offset[key][0], height // 2 + self.buttons_offset[key][1])
+
+    def on_deactivate(self):
+        if self.level == 'normal':
+            self.set_exclusive_mouse(False)
+            self.level = 'escape_menu'
 
     def set_2d(self):
         """ Configure OpenGL to draw in 2d.
