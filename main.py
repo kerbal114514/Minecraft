@@ -6,7 +6,6 @@ import os
 import sys
 import importlib
 
-import numpy as np
 import pyglet
 from pyglet.gl import *
 from pyglet.window import key, mouse
@@ -54,7 +53,7 @@ def cube_vertices(x, y, z, n):
         [x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n],  # back
     ]
 
-simulate_distance = 8
+simulate_distance = 4
 simulate_sectors = set()
 for x in range(-simulate_distance, simulate_distance + 1):
     for y in range(-simulate_distance, simulate_distance + 1):
@@ -184,7 +183,31 @@ class Shader:
 
 class BlockShader(Shader):
     def __init__(self, vert_code, frag_code):
-        super().__init__(vert_code, frag_code)
+        self.program = glCreateProgram()
+
+        # 编译顶点着色器
+        self.vs = self.compile_shader(vert_code, GL_VERTEX_SHADER)
+        # 编译片段着色器
+        self.fs = self.compile_shader(frag_code, GL_FRAGMENT_SHADER)
+
+        glAttachShader(self.program, self.vs)
+        glAttachShader(self.program, self.fs)
+        glBindAttribLocation(self.program, 0, b"a_pos")
+        glBindAttribLocation(self.program, 1, b"a_tex_coords")
+        glBindAttribLocation(self.program, 2, b"a_draw_flag")
+        glLinkProgram(self.program)
+
+        status = GLint()
+        glGetProgramiv(self.program, GL_LINK_STATUS, ctypes.byref(status))
+        if not status.value:
+            # 如果链接失败，获取错误日志
+            log_length = GLint()
+            glGetProgramiv(self.program, GL_INFO_LOG_LENGTH, ctypes.byref(log_length))
+            log = ctypes.create_string_buffer(log_length.value)
+            glGetProgramInfoLog(self.program, log_length, None, log)
+            print("Shader Link Error:")
+            print(log.value.decode())
+            raise RuntimeError("Shader linking failed.")
         self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
         self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
 
@@ -335,8 +358,11 @@ class Window(pyglet.window.Window):
         # 着色器
         self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
         self.skybox_shader = SkyboxShader(skybox_vertex_shader_code, skybox_fragment_shader_code)
+        # VBO id
+        self.vbo_id = {}
+        self.vbo_size = {}
         # 函数字典
-        self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update}
+        self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
@@ -350,6 +376,21 @@ class Window(pyglet.window.Window):
 
     def save_and_return(self):
         self.on_close()
+
+    def update_vbo_data(self, x, y):
+        if (x, y) not in self.vbo_id:
+            vbo_id = GLuint(0)
+            glGenBuffers(1, ctypes.byref(vbo_id))
+            self.vbo_id[(x, y)] = vbo_id
+        vbo_id = self.vbo_id[(x, y)]
+        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+        self.world.lock_world_mutex()
+        data = self.world.get_sector_vbo_data_ptr(x, y)
+        data_ptr = ctypes.cast(data[0], ctypes.POINTER(GLfloat))
+        glBufferData(GL_ARRAY_BUFFER, data[1] * ctypes.sizeof(GLfloat), data_ptr, GL_STATIC_DRAW)
+        self.world.unlock_world_mutex()
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        self.vbo_size[(x, y)] = data[1] * 4
 
     def update_shown(self, x, y, z):
         vertex_data = cube_vertices(x, y, z, 0.5)
@@ -737,6 +778,8 @@ class Window(pyglet.window.Window):
 
     def on_close(self):
         del self.world
+        for i in self.vbo_id:
+            glDeleteBuffers(1, self.vbo_id[i])
         self.close()
 
     def on_resize(self, width, height):
@@ -815,11 +858,29 @@ class Window(pyglet.window.Window):
         glDepthMask(GL_FALSE)
         self.draw_sky()
         glDepthMask(GL_TRUE)
+        sector = (int(self.position[0]) // 16, int(self.position[2]) // 16)
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
         self.block_shader.bind(self.render_distance * 16 - 16, self.position)
-        self.batch.draw()
+        # a_pos (location 0)
+        glEnableVertexAttribArray(0)
+        # a_tex_coords (location 1)
+        glEnableVertexAttribArray(1)
+        # draw_flag (location 2)
+        glEnableVertexAttribArray(2)
+        for key in self.vbo_id:
+            if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
+                continue
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_id[key])
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(0 * 4))
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(3 * 4))
+            glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(6 * 4))
+            glDrawArrays(GL_QUADS, 0, self.vbo_size[key])
+        glDisableVertexAttribArray(0)
+        glDisableVertexAttribArray(1)
+        glDisableVertexAttribArray(2)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
         self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()
