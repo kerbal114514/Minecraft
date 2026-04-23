@@ -10,7 +10,7 @@ import pyglet
 from pyglet.gl import *
 from pyglet.window import key, mouse
 
-from MCworld import World
+import MCworld
 
 sys.path.append('./codes/')
 Button = getattr(importlib.import_module('PygletButton'), 'Button')
@@ -296,6 +296,7 @@ with open("Shaders/skybox_fragment_shader.glsl") as f:
 class Window(pyglet.window.Window):
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
+        MCworld.glewInit()
         # 是否锁定鼠标
         self.exclusive = False
         # Strafing is moving lateral to the direction you are facing,
@@ -320,10 +321,7 @@ class Window(pyglet.window.Window):
         self.reticle = None
         self.escape_menu_shade = None
         self.render_distance = simulate_distance
-        self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
-        # 显示的方块，pyglet渲染对象
-        self.shown = {}
-        self.batch = pyglet.graphics.Batch()
+        self.world = MCworld.World(random.randint(0, 2 ** 31 - 5), self.render_distance)
         # 按键
         self.space = False
         self.last_space_press = -1
@@ -360,9 +358,12 @@ class Window(pyglet.window.Window):
         self.skybox_shader = SkyboxShader(skybox_vertex_shader_code, skybox_fragment_shader_code)
         # VBO id
         self.vbo_id = {}
+        self.vao_id = {}
         self.vbo_size = {}
         # 函数字典
-        self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
+        self.functions = {
+            'block_update': self.block_update,
+        }
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
@@ -376,42 +377,6 @@ class Window(pyglet.window.Window):
 
     def save_and_return(self):
         self.on_close()
-
-    def update_vbo_data(self, x, y):
-        if (x, y) not in self.vbo_id:
-            vbo_id = GLuint(0)
-            glGenBuffers(1, ctypes.byref(vbo_id))
-            self.vbo_id[(x, y)] = vbo_id
-        vbo_id = self.vbo_id[(x, y)]
-        glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-        self.world.lock_world_mutex()
-        data = self.world.get_sector_vbo_data_ptr(x, y)
-        data_ptr = ctypes.cast(data[0], ctypes.POINTER(GLfloat))
-        glBufferData(GL_ARRAY_BUFFER, data[1] * ctypes.sizeof(GLfloat), data_ptr, GL_STATIC_DRAW)
-        self.world.unlock_world_mutex()
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
-        self.vbo_size[(x, y)] = data[1] * 4
-
-    def update_shown(self, x, y, z):
-        vertex_data = cube_vertices(x, y, z, 0.5)
-        if (x, y, z) not in self.shown:
-            self.shown[(x, y, z)] = [0, {}]
-        shown = self.world.get_shown(x, y, z)
-        block_type = block_id[self.world.get_block(x, y, z)]
-        for i in range(64):
-            mask = 1 << i
-            if ((shown & mask) != (self.shown[(x, y, z)][0] & mask)):
-                if (self.shown[(x, y, z)][0] & mask):
-                    self.shown[(x, y, z)][1][i].delete()
-                    del self.shown[(x, y, z)][1][i]
-                else:
-                    tex_coords = get_tex_array_data(block_type, i)
-                    self.shown[(x, y, z)][1][i] = self.batch.add(
-                        4, GL_QUADS, None,
-                        ('v3f/static', vertex_data[i]),
-                        ('t3f/static', tex_coords)
-                    )
-        self.shown[(x, y, z)][0] = shown
 
     def hide_block(self, x, y, z):
         if (x, y, z) not in self.shown:
@@ -863,24 +828,18 @@ class Window(pyglet.window.Window):
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
         self.block_shader.bind(self.render_distance * 16 - 16, self.position)
-        # a_pos (location 0)
-        glEnableVertexAttribArray(0)
-        # a_tex_coords (location 1)
-        glEnableVertexAttribArray(1)
-        # draw_flag (location 2)
-        glEnableVertexAttribArray(2)
-        for key in self.vbo_id:
+        '''for key in self.vao_id:
             if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
                 continue
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_id[key])
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(0 * 4))
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(3 * 4))
-            glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(6 * 4))
+            glBindVertexArray(self.vao_id[key])
             glDrawArrays(GL_QUADS, 0, self.vbo_size[key])
-        glDisableVertexAttribArray(0)
-        glDisableVertexAttribArray(1)
-        glDisableVertexAttribArray(2)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glBindVertexArray(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)'''
+        self.world.draw()
+        err = glGetError()
+        if err != 0:
+            print(f"OpenGL Error: {err}")
+            pass
         self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()

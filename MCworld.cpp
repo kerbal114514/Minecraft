@@ -14,7 +14,11 @@
 #include <set>
 #include <tuple>
 #include <chrono>
+#include <functional>
+#include <memory>
 #include <FastNoise/FastNoise.h>
+#include <GL/glew.h>
+#include <GL/gl.h>
 using namespace std;
 #define get_sector(x) ((x >= 0) ? (x / 16) : ((x - 15) / 16))
 using ull = unsigned long long;
@@ -128,21 +132,89 @@ struct Sector_block_pos_hash
     }
 };
 
-struct GL_QUADS_vbo_data
+struct GL_QUADS_vbo
 {
-    unsigned int size;
+    // 单位是面
+    unsigned int size, reserve_size, current_size;
     vector<unsigned int> unoccupied_ids;
     vector<float> data;
     vector<float> tmp;
-    GL_QUADS_vbo_data()
+    vector<float> empty;
+    GLuint vbo_id, vao_id;
+    queue<function<void()>> operations;
+
+    GL_QUADS_vbo()
     {
         size = 0;
+        reserve_size = 1048576;
         tmp.resize(4 * 7);
-        data.reserve(4 * 7 * 16384);
+        data.reserve(4 * 7 * 1048576);
+        empty.resize(4 * 7);
+        fill(empty.begin(), empty.end(), 0.0);
+        operations.push(
+            [this]() mutable -> void
+            {
+                glGenBuffers(1, &(this->vbo_id));
+                glGenVertexArrays(1, &(this->vao_id));
+                glBindVertexArray(this->vao_id);
+                glBindBuffer(GL_ARRAY_BUFFER, this->vbo_id);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(0 * sizeof(GLfloat)));
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(3 * sizeof(GLfloat)));
+                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(6 * sizeof(GLfloat)));
+                glEnableVertexAttribArray(0);
+                glEnableVertexAttribArray(1);
+                glEnableVertexAttribArray(2);
+                glBindVertexArray(0);
+                glBufferData(GL_ARRAY_BUFFER, 1048576 * 4 * 7 * sizeof(GLfloat), nullptr, GL_DYNAMIC_DRAW);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+            }
+        );
     }
-    int add(vector<float> vertices)    // vertices长度为4 * 6表示一个面（一个顶点长度为6，三个坐标，三个纹理）
+
+    ~GL_QUADS_vbo()
     {
-        int id;
+        //glDeleteVertexArrays(1, &vao_id);
+        //glDeleteBuffers(1, &vbo_id);
+    }
+
+    void reserve(unsigned int sz)
+    {
+        reserve_size = sz;
+        data.reserve(reserve_size * 4 * 7);
+        unsigned reserve_size_lambda = reserve_size;
+        operations.push(
+            [this, reserve_size_lambda]() mutable -> void
+            {
+                GLuint new_vbo_id;
+                glGenBuffers(1, &new_vbo_id);
+                glBindBuffer(GL_ARRAY_BUFFER, new_vbo_id);
+                glBufferData(GL_ARRAY_BUFFER, reserve_size_lambda * 4 * 7 * sizeof(GLfloat), nullptr, GL_DYNAMIC_DRAW);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindBuffer(GL_COPY_READ_BUFFER, this->vbo_id);
+                glBindBuffer(GL_COPY_WRITE_BUFFER, new_vbo_id);
+                glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, this->current_size * 4 * 7 * sizeof(GLfloat));
+                glBindBuffer(GL_COPY_READ_BUFFER, 0);
+                glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+                glDeleteBuffers(1, &(this->vbo_id));
+                this->vbo_id = new_vbo_id;
+                glBindVertexArray(this->vao_id);
+                glBindBuffer(GL_ARRAY_BUFFER, this->vbo_id);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(0 * sizeof(GLfloat)));
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(3 * sizeof(GLfloat)));
+                glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 7, (void*)(6 * sizeof(GLfloat)));
+                glEnableVertexAttribArray(0);
+                glEnableVertexAttribArray(1);
+                glEnableVertexAttribArray(2);
+                glBindVertexArray(0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+            }
+        );
+    }
+
+    unsigned int add(vector<float> vertices, bool update=true)    // vertices长度为4 * 6表示一个面（一个顶点长度为6，三个坐标，三个纹理）
+    // 如果update，就立即同步到VBO
+    {
+        unsigned int id;
         if (unoccupied_ids.empty())
             id = size++;
         else
@@ -150,6 +222,10 @@ struct GL_QUADS_vbo_data
             id = unoccupied_ids[unoccupied_ids.size() - 1];
             unoccupied_ids.pop_back();
         }
+        if (size > reserve_size)
+            reserve(size * 1.5);
+        if (id == size - 1 && update)
+            ++current_size;
         for (int i = 0; i < 4; ++i)
         {
             for (int j = 0; j < 6; ++j)
@@ -158,12 +234,63 @@ struct GL_QUADS_vbo_data
         }
         data.resize(size * 4 * 7);
         copy(tmp.begin(), tmp.end(), data.begin() + id * 4 * 7);
+        if (update)
+        {
+            vector<float> tmp_lambda(tmp);
+            operations.push(
+                [this, tmp_lambda, id]() mutable -> void
+                {
+                    glBindBuffer(GL_ARRAY_BUFFER, this->vbo_id);
+                    glBufferSubData(GL_ARRAY_BUFFER, id * 4 * 7 * sizeof(GLfloat), 4 * 7 * sizeof(GLfloat), tmp_lambda.data());
+                    glBindBuffer(GL_ARRAY_BUFFER, 0);
+                }
+            );
+        }
         return id;
     }
-    void erase(int id)
+
+    void update()    // 将更改写入VBO
+    {
+        current_size = size;
+        if (size > reserve_size)
+            reserve(size * 1.5);
+        operations.push(
+            [this]() mutable -> void
+            {
+                glBindBuffer(GL_ARRAY_BUFFER, this->vbo_id);
+                glBufferSubData(GL_ARRAY_BUFFER, 0, size * 4 * 7 * sizeof(GLfloat), this->data.data());
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+            }
+        );
+    }
+
+    void erase(unsigned int id, bool update=true)
     {
         fill(data.begin() + id * 4 * 7, data.begin() + (id + 1) * 4 * 7, 0.0f);
         unoccupied_ids.push_back(id);
+        if (update)
+        {
+            operations.push(
+                [this, id]() mutable -> void
+                {
+                    glBindBuffer(GL_ARRAY_BUFFER, this->vbo_id);
+                    glBufferSubData(GL_ARRAY_BUFFER, id * 4 * 7 * sizeof(GLfloat), 4 * 7 * sizeof(GLfloat), this->empty.data());
+                    glBindBuffer(GL_ARRAY_BUFFER, 0);
+                }
+            );
+        }
+    }
+
+    void draw()
+    {
+        while(!operations.empty())
+        {
+            operations.front()();
+            operations.pop();
+        }
+        glBindVertexArray(vao_id);
+        glDrawArrays(GL_QUADS, 0, current_size * 4);
+        glBindVertexArray(0);
     }
 };
 
@@ -171,9 +298,8 @@ struct Sector
 {
     Block* blocks;
     int* data;
-    GL_QUADS_vbo_data vertex_data_struct;
     //                   方块坐标        之前的渲染状态  面的id
-    unordered_map<tuple<int, int, int>, pair<ull, vector<int>>, Sector_block_pos_hash> shown;
+    unordered_map<tuple<int, int, int>, pair<ull, vector<unsigned int>>, Sector_block_pos_hash> shown;
     Sector()
     {
         blocks = new Block[16 * 128 * 16];    // (x, y, z)为blocks[x * 16 * 128 + y * 16 + z]
@@ -263,6 +389,8 @@ float hash2D(int x, int z, int seed) {
 struct World
 {
     unordered_map<Sector_pos, Sector*, Sector_pos_hash> world;
+    // 借用Sector_pos结构体，实际上要x, y除以16，
+    unordered_map<Sector_pos, unique_ptr<GL_QUADS_vbo>, Sector_pos_hash> vbos;
     int stoped_threads = 0;
     int simulate_distance;
     unordered_set<Sector_pos, Sector_pos_hash> simulate_sectors;
@@ -379,10 +507,13 @@ struct World
         }
     }
 
-    void update_shown(int x, int y, int z, ull shown)
+    void update_shown(int x, int y, int z, ull shown, bool update)
     {
         int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
         int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
+        Sector_pos vbo_pos = {(sector_x >= 0) ? (sector_x / 16) : ((sector_x - 15) / 16), (sector_y >= 0) ? (sector_y / 16) : ((sector_y - 15) / 16)};
+        if(!vbos[vbo_pos])
+            vbos[vbo_pos] = make_unique<GL_QUADS_vbo>();
         Sector* sector = world[{sector_x, sector_y}];
         vector<vector<float>> vertex_data = cube_vertices((float)x, (float)y, (float)z, 0.5);
         ull mask;
@@ -400,10 +531,10 @@ struct World
                 if (shown & mask)
                 {
                     vector<float> vertex_texture_data = get_tex_array_data(id, i, x, y, z);
-                    sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                    sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i] = vbos[vbo_pos]->add(vertex_texture_data, update);
                 }
                 else
-                    sector->vertex_data_struct.erase(sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i]);
+                    vbos[vbo_pos]->erase(sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i], update);
             }
         }
         sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].first = shown;
@@ -446,13 +577,10 @@ struct World
             check_neighbors(x, y, z);
             lock_guard<recursive_mutex> lock_operations(operations_mutex);
             operations.push_back(format("block_update {} {} {}", x, y, z));
-            operations.push_back(format("update_vbo_data {} {}", get_sector(x), get_sector(z)));
             for (int i = 0, dx, dz, nx, nz; i < 6; ++i)
             {
                 dx = FACES[i][0], dz = FACES[i][2];
                 nx = x + dx, nz = z + dz;
-                if (get_sector(nx) != get_sector(x) || get_sector(nz) != get_sector(z))
-                    operations.push_back(format("update_vbo_data {} {}", get_sector(nx), get_sector(nz)));
             }
         }
     }
@@ -474,24 +602,21 @@ struct World
             check_neighbors(x, y, z);
             lock_guard<recursive_mutex> lock_operations(operations_mutex);
             operations.push_back(format("block_update {} {} {}", x, y, z));
-            operations.push_back(format("update_vbo_data {} {}", get_sector(x), get_sector(z)));
             for (int i = 0, dx, dz, nx, nz; i < 6; ++i)
             {
                 dx = FACES[i][0], dz = FACES[i][2];
                 nx = x + dx, nz = z + dz;
-                if (get_sector(nx) != get_sector(x) || get_sector(nz) != get_sector(z))
-                    operations.push_back(format("update_vbo_data {} {}", get_sector(nx), get_sector(nz)));
             }
         }
     }
 
-    void set_shown(int x, int y, int z, ull shown)
+    void set_shown(int x, int y, int z, ull shown, bool update=true)
     {
         // 不加锁，调用这个函数一定要在外面加锁(world_mutex, shown_mutex)
         if (find_block(x, y, z)->shown == shown)
             return;
         find_block(x, y, z)->shown = shown;
-        update_shown(x, y, z, shown);
+        update_shown(x, y, z, shown, update);
     }
 
     void lock_world_mutex()
@@ -514,6 +639,7 @@ struct World
         float* cave_noise = new float[5 * 33 * 5];
         float* cave_noise_mix = new float[16 * 128 * 16];    // 差值后的洞穴噪声
         int old_dx = dx, old_dy = dy;
+        Sector_pos vbo_pos = {(dx >= 0) ? (dx / 16) : ((dx - 15) / 16), (dy >= 0) ? (dy / 16) : ((dy - 15) / 16)};
         dx *= 16, dy *= 16;
         float h1, h2, tmp;
         int height1, height2;
@@ -590,17 +716,8 @@ struct World
             for (int z = -1; z != 17; ++z)
                 for (int y = 0; y != 128; ++y)
                     if ((exp = exposed(dx + x, y, dy + z)) != 0ull)
-                        set_shown(dx + x, y, dy + z, exp);
-        lock_guard<recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy));
-        if (world.count({old_dx + 1, old_dy}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx + 1, old_dy));
-        if (world.count({old_dx, old_dy + 1}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy + 1));
-        if (world.count({old_dx - 1, old_dy}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx - 1, old_dy));
-        if (world.count({old_dx, old_dy - 1}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy - 1));
+                        set_shown(dx + x, y, dy + z, exp, false);
+        vbos[vbo_pos]->update();
     }
 
     bool has_tree(int x, int z)
@@ -621,6 +738,7 @@ struct World
 
     void decorate_sector(int sx, int sy)
     {
+        Sector_pos vbo_pos = {(sx >= 0) ? (sx / 16) : ((sx - 15) / 16), (sy >= 0) ? (sy / 16) : ((sy - 15) / 16)};
         lock_guard<recursive_mutex> lock_world(world_mutex);
         lock_guard<recursive_mutex> lock_shown(shown_mutex);
         Sector* sector = world[{sx, sy}];
@@ -680,15 +798,10 @@ struct World
                     for (int dx = -5; dx <= 5; ++dx)
                         for (int dz = -5; dz <= 5; ++dz)
                             for (int dy = -1; dy <= 9; ++dy)
-                                set_shown(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, exposed(sx * 16 + x + dx, y + dy, sy * 16 + z + dz));
+                                set_shown(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, exposed(sx * 16 + x + dx, y + dy, sy * 16 + z + dz), false);
                 }
             }
-        lock_guard<recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(format("update_vbo_data {} {}", sx, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx + 1, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx, sy + 1));
-        operations.push_back(format("update_vbo_data {} {}", sx - 1, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx, sy - 1));
+        vbos[vbo_pos]->update();
     }
 
     void show_sector(int dx, int dy)
@@ -740,6 +853,10 @@ struct World
                     generated_sectors.insert(now);
                     shown_sectors.insert(now);
                     generate_sector(now.x, now.y);
+                    {
+                        lock_guard<recursive_mutex> lock_operations(operations_mutex);
+                        //operations.push_back(format("show_sector {} {}", now.x, now.y));
+                    }
                 }
             }
             for (Sector_pos ds : decorate_sectors)
@@ -752,18 +869,22 @@ struct World
                 }
             }
             // 现在不需要，只需要在python中超出范围的不渲染就行了
-            /*// 显示/隐藏区块
-            ought_shown.clear(), show.clear(), hide.clear();
-            operations_local.clear();
+            // 现在需要告诉python渲染哪些区块，用于multi_vbo_render
+            // 显示/隐藏区块
+            /*ought_shown.clear(), show.clear(), hide.clear();
+            //operations_local.clear();
             for (Sector_pos ds : simulate_sectors)
                 ought_shown.insert(player_sector + ds);
-            for (Sector_pos i : ought_shown)
-                if (shown_sectors.count(i) == 0)
-                    show.insert(i);
-            for (Sector_pos i : shown_sectors)
-                if (ought_shown.count(i) == 0)
-                    hide.insert(i);
-            // 先隐藏再显示，python shown字典元素少，速度快
+            {
+                lock_guard<recursive_mutex> lock_operations(operations_mutex);
+                for (Sector_pos i : ought_shown)
+                    if (shown_sectors.count(i) == 0)
+                        operations.push_back(format("show_sector {} {}", i.x, i.y));
+                for (Sector_pos i : shown_sectors)
+                    if (ought_shown.count(i) == 0)
+                        operations.push_back(format("hide_sector {} {}", i.x, i.y));
+            }*/
+            /*// 先隐藏再显示，python shown字典元素少，速度快
             for (Sector_pos i : hide)
             {
                 shown_sectors.erase(i);
@@ -863,16 +984,17 @@ struct World
         return pybind11::make_tuple(pybind11::none(), pybind11::none());
     }
 
-    pybind11::tuple get_sector_vbo_data_ptr(int x, int y)
+    void draw()
     {
-        // 第一个是指针，第二个是长度
-        return pybind11::make_tuple(reinterpret_cast<uintptr_t>(world[{x, y}]->vertex_data_struct.data.data()), world[{x, y}]->vertex_data_struct.data.size());
+        for (auto &vbo : vbos)
+            vbo.second->draw();
     }
 };
 
 PYBIND11_MODULE(MCworld, m)
 {
     using namespace pybind11::literals; // 引入 _a 字面量，让代码更可读
+    m.def("glewInit", &glewInit);
     pybind11::class_<World>(m, "World")
         .def(pybind11::init<int, int>())
         .def("start_process_sector_thread", &World::start_process_sector_thread, pybind11::call_guard<pybind11::gil_scoped_release>())
@@ -890,8 +1012,8 @@ PYBIND11_MODULE(MCworld, m)
         .def("hit_test", &World::hit_test)
         .def("set_position", &World::set_position)
         .def("add_operation", &World::add_operation)
-        .def("get_sector_vbo_data_ptr", &World::get_sector_vbo_data_ptr)
         .def("generate_sector", &World::generate_sector)
         .def("lock_world_mutex", &World::lock_world_mutex)
-        .def("unlock_world_mutex", &World::unlock_world_mutex);
+        .def("unlock_world_mutex", &World::unlock_world_mutex)
+        .def("draw", &World::draw);
 }
