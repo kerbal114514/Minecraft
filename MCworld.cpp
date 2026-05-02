@@ -41,15 +41,23 @@ int SECTOR_FACES[8][2] =
     -1, 1,
     -1, -1,
 };
+// 法线：1 : (1, 0, 0)
+//       2 : (-1, 0, 0)
+//       3 : (0, 1, 0)
+//       4 : (0, -1, 0)
+//       5 : (0, 0, 1)
+//       6 : (0, 0, -1)
+//       0 : 不渲染
 vector<vector<float>> cube_vertices(float x, float y, float z, float n)
 {
     vector<vector<float>> ret(6);
-    ret[0] = vector<float>({x-n,y+n,z-n, x-n,y+n,z+n, x+n,y+n,z+n, x+n,y+n,z-n});    // top
-    ret[1] = vector<float>({x-n,y-n,z-n, x+n,y-n,z-n, x+n,y-n,z+n, x-n,y-n,z+n});    // bottom
-    ret[2] = vector<float>({x-n,y-n,z-n, x-n,y-n,z+n, x-n,y+n,z+n, x-n,y+n,z-n});    // left
-    ret[3] = vector<float>({x+n,y-n,z+n, x+n,y-n,z-n, x+n,y+n,z-n, x+n,y+n,z+n});    // right
-    ret[4] = vector<float>({x-n,y-n,z+n, x+n,y-n,z+n, x+n,y+n,z+n, x-n,y+n,z+n});    // front
-    ret[5] = vector<float>({x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n});    // back
+    // 最后一个是法线
+    ret[0] = vector<float>({x-n,y+n,z-n, x-n,y+n,z+n, x+n,y+n,z+n, x+n,y+n,z-n, 3.0f});    // top
+    ret[1] = vector<float>({x-n,y-n,z-n, x+n,y-n,z-n, x+n,y-n,z+n, x-n,y-n,z+n, 4.0f});    // bottom
+    ret[2] = vector<float>({x-n,y-n,z-n, x-n,y-n,z+n, x-n,y+n,z+n, x-n,y+n,z-n, 2.0f});    // left
+    ret[3] = vector<float>({x+n,y-n,z+n, x+n,y-n,z-n, x+n,y+n,z-n, x+n,y+n,z+n, 1.0f});    // right
+    ret[4] = vector<float>({x-n,y-n,z+n, x+n,y-n,z+n, x+n,y+n,z+n, x-n,y+n,z+n, 5.0f});    // front
+    ret[5] = vector<float>({x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n, 6.0f});    // back
     return ret;
 }
 
@@ -104,15 +112,16 @@ vector<float> get_tex_array_data(unsigned short id, int face_index, int x, int y
 {
     int img_idx = textures.at(id)[face_index];
     vector<float> vertices = cube_vertices(x, y, z, 0.5)[face_index];
-    vector<float> ret(6 * 4);
-    for (unsigned int i = 0; i != vertices.size(); i += 3)
+    vector<float> ret(7 * 4);
+    for (unsigned int i = 0, j = 0; i != 4 * 7; i += 7, j += 3)
     {
-        ret[i * 2] = vertices[i];
-        ret[i * 2 + 1] = vertices[i + 1];
-        ret[i * 2 + 2] = vertices[i + 2];
-        ret[i * 2 + 3] = uvs[i];
-        ret[i * 2 + 4] = uvs[i + 1];
-        ret[i * 2 + 5] = img_idx;
+        ret[i] = vertices[j];
+        ret[i + 1] = vertices[j + 1];
+        ret[i + 2] = vertices[j + 2];
+        ret[i + 3] = uvs[j];
+        ret[i + 4] = uvs[j + 1];
+        ret[i + 5] = img_idx;
+        ret[i + 6] = vertices[12];
     }
     return ret;
 }
@@ -133,14 +142,19 @@ struct GL_QUADS_vbo_data
     unsigned int size;
     vector<unsigned int> unoccupied_ids;
     vector<float> data;
-    vector<float> tmp;
     GL_QUADS_vbo_data()
     {
         size = 0;
-        tmp.resize(4 * 7);
-        data.reserve(4 * 7 * 16384);
+        data.reserve(4 * 7 * 256);
     }
-    int add(vector<float> vertices)    // vertices长度为4 * 6表示一个面（一个顶点长度为6，三个坐标，三个纹理）
+    int add(vector<float> vertices)    // vertices长度为4 * 7表示一个面（一个顶点长度为7，三个坐标，三个纹理，最后一个是法线和渲染状态，压缩为一个GLfloat）
+    // 法线：1 : (1, 0, 0)
+    //       2 : (-1, 0, 0)
+    //       3 : (0, 1, 0)
+    //       4 : (0, -1, 0)
+    //       5 : (0, 0, 1)
+    //       6 : (0, 0, -1)
+    //       0 : 不渲染
     {
         int id;
         if (unoccupied_ids.empty())
@@ -150,14 +164,8 @@ struct GL_QUADS_vbo_data
             id = unoccupied_ids[unoccupied_ids.size() - 1];
             unoccupied_ids.pop_back();
         }
-        for (int i = 0; i < 4; ++i)
-        {
-            for (int j = 0; j < 6; ++j)
-                tmp[i * 7 + j] = vertices[i * 6 + j];
-            tmp[i * 7 + 6] = 1.0f;
-        }
         data.resize(size * 4 * 7);
-        copy(tmp.begin(), tmp.end(), data.begin() + id * 4 * 7);
+        copy(vertices.begin(), vertices.end(), data.begin() + id * 4 * 7);
         return id;
     }
     void erase(int id)

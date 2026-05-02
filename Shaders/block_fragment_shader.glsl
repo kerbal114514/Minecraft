@@ -4,8 +4,10 @@ uniform sampler2DArray u_texture_array;
 varying vec3 v_tex_coords;
 varying float v_distance;
 varying vec3 v_vertex_pos;
+varying vec3 v_normal;
 uniform float u_render_distance;
 uniform vec3 u_position;
+uniform vec3 u_light_direction;
 vec4 get_sky_color(float factor)
 {
     vec4 skyColor = vec4(0.48, 0.72, 0.93, 1.0);
@@ -19,10 +21,13 @@ vec4 get_sky_color(float factor)
 }
 void main()
 {
-    if (v_distance > u_render_distance) discard;
+    if (v_distance > u_render_distance)
+        discard;
     vec4 color = texture(u_texture_array, v_tex_coords);
     if (color.a < 0.5)
         discard;
+    float brightness = max(dot(u_light_direction, v_normal), 0.8);
+    color = vec4(color.rgb * brightness, 1.0);
     if (u_render_distance - v_distance < 8.0)
     {
         float height = normalize(v_vertex_pos - u_position).y;

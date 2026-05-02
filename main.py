@@ -194,7 +194,7 @@ class BlockShader(Shader):
         glAttachShader(self.program, self.fs)
         glBindAttribLocation(self.program, 0, b"a_pos")
         glBindAttribLocation(self.program, 1, b"a_tex_coords")
-        glBindAttribLocation(self.program, 2, b"a_draw_flag")
+        glBindAttribLocation(self.program, 2, b"a_normal")
         glLinkProgram(self.program)
 
         status = GLint()
@@ -210,11 +210,13 @@ class BlockShader(Shader):
             raise RuntimeError("Shader linking failed.")
         self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
         self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
+        self.u_light_direction_loc = glGetUniformLocation(self.program, b"u_light_direction")
 
-    def bind(self, u_render_distance, u_position):
+    def bind(self, u_render_distance, u_position, u_light_direction):
         super().bind()
         glUniform1f(self.u_render_distance_loc, u_render_distance)
         glUniform3f(self.u_position_loc, *u_position)
+        glUniform3f(self.u_light_direction_loc, *u_light_direction)
 
 
 FACES = (
@@ -230,6 +232,8 @@ def empty_update_func(self, x, y, z):
     return False
 
 block_update_func = {
+    'block.minecraft.dev.sector_not_loaded': empty_update_func,
+    'block.minecraft.dev.air': empty_update_func,
     'block.minecraft.nature.grass_block': empty_update_func,
     'block.minecraft.nature.dirt': empty_update_func,
     'block.minecraft.nature.bedrock': empty_update_func,
@@ -255,6 +259,8 @@ def dirt_random_tick_func(self, x, y, z):
                 return True
 
 block_random_tick_func = {
+    'block.minecraft.dev.sector_not_loaded': empty_update_func,
+    'block.minecraft.dev.air': empty_update_func,
     'block.minecraft.nature.grass_block': grass_block_random_tick_func,
     'block.minecraft.nature.dirt': dirt_random_tick_func,
     'block.minecraft.nature.bedrock': empty_update_func,
@@ -350,6 +356,7 @@ class Window(pyglet.window.Window):
         self.vbo_id = {}
         self.vao_id = {}
         self.vbo_size = {}
+        self.vbo_reserve_size = {}
         # 函数字典
         self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
         # 生成天空盒顶点数据
@@ -365,7 +372,7 @@ class Window(pyglet.window.Window):
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
-        pyglet.clock.schedule_interval(self.porcess_random_tick, 1 / gamerule['tick_per_second'])
+        pyglet.clock.schedule_interval(self.process_random_tick, 1 / gamerule['tick_per_second'])
         # 创建处理区块的线程
         self.world.start_process_sector_thread()
 
@@ -384,6 +391,7 @@ class Window(pyglet.window.Window):
             glGenVertexArrays(1, ctypes.byref(vao_id))
             self.vbo_id[(x, y)] = vbo_id
             self.vao_id[(x, y)] = vao_id
+            self.vbo_reserve_size[(x, y)] = 0
             glBindVertexArray(vao_id)
             glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
             # a_pos (location 0)
@@ -402,7 +410,13 @@ class Window(pyglet.window.Window):
         self.world.lock_world_mutex()
         data = self.world.get_sector_vbo_data_ptr(x, y)
         data_ptr = ctypes.cast(data[0], ctypes.POINTER(GLfloat))
-        glBufferData(GL_ARRAY_BUFFER, data[1] * ctypes.sizeof(GLfloat), data_ptr, GL_STATIC_DRAW)
+        if (data[1] > self.vbo_reserve_size[(x, y)]):
+            self.vbo_reserve_size[(x, y)] = int(data[1] * 1.2)
+            glBufferData(GL_ARRAY_BUFFER, self.vbo_reserve_size[(x, y)] * ctypes.sizeof(GLfloat), None, GL_DYNAMIC_DRAW)
+        elif (data[1] * 1.5 < self.vbo_reserve_size[(x, y)]):
+            self.vbo_reserve_size[(x, y)] = int(data[1] * 1.2)
+            glBufferData(GL_ARRAY_BUFFER, self.vbo_reserve_size[(x, y)] * ctypes.sizeof(GLfloat), None, GL_DYNAMIC_DRAW)
+        glBufferSubData(GL_ARRAY_BUFFER, 0, data[1] * ctypes.sizeof(GLfloat), data_ptr)
         self.world.unlock_world_mutex()
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         self.vbo_size[(x, y)] = data[1] // 7
@@ -443,7 +457,7 @@ class Window(pyglet.window.Window):
                 if block_update_func[block_id[block]](self, nx, ny, nz):
                     self.world.add_operation("block_update", nx, ny, nz)
 
-    def porcess_random_tick(self, dt):
+    def process_random_tick(self, dt):
         nx, ny = int(round(self.position[0])) // 16, int(round(self.position[2])) // 16
         for dx, dy in simulate_sectors:
             x, y = nx + dx, ny + dy
@@ -874,10 +888,26 @@ class Window(pyglet.window.Window):
             y -= 0.5
         glTranslatef(-x, -y, -z)
         sector = (int(self.position[0]) // 16, int(self.position[2]) // 16)
+        x, y = 45, 60
+        # y ranges from -90 to 90, or -pi/2 to pi/2, so m ranges from 0 to 1 and
+        # is 1 when looking ahead parallel to the ground and 0 when looking
+        # straight up or down.
+        m = math.cos(math.radians(y))
+        # dy ranges from -1 to 1 and is -1 when looking straight down and 1 when
+        # looking straight up.
+        dy = math.sin(math.radians(y))
+        dx = math.cos(math.radians(x - 90)) * m
+        dz = math.sin(math.radians(x - 90)) * m
+        if (dx >= dy and dx >= dz):
+            tmp = 1 / dx
+        if (dy >= dx and dy >= dz):
+            tmp = 1 / dy
+        if (dz >= dy and dz >= dx):
+            tmp = 1 / dz
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
-        self.block_shader.bind(self.render_distance * 16 - 16, self.position)
+        self.block_shader.bind(self.render_distance * 16 - 16, self.position, (dx * tmp, dy * tmp, dz * tmp))
         for key in self.vao_id:
             if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
                 continue
