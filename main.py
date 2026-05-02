@@ -53,7 +53,7 @@ def cube_vertices(x, y, z, n):
         [x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n],  # back
     ]
 
-simulate_distance = 4
+simulate_distance = 8
 simulate_sectors = set()
 for x in range(-simulate_distance, simulate_distance + 1):
     for y in range(-simulate_distance, simulate_distance + 1):
@@ -216,15 +216,6 @@ class BlockShader(Shader):
         glUniform1f(self.u_render_distance_loc, u_render_distance)
         glUniform3f(self.u_position_loc, *u_position)
 
-class SkyboxShader(Shader):
-    def __init__(self, vert_code, frag_code):
-        super().__init__(vert_code, frag_code)
-        self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
-
-    def bind(self, u_position):
-        super().bind()
-        glUniform3f(self.u_position_loc, *u_position)
-
 
 FACES = (
     (0, 1, 0),
@@ -321,9 +312,6 @@ class Window(pyglet.window.Window):
         self.escape_menu_shade = None
         self.render_distance = simulate_distance
         self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
-        # 显示的方块，pyglet渲染对象
-        self.shown = {}
-        self.batch = pyglet.graphics.Batch()
         # 按键
         self.space = False
         self.last_space_press = -1
@@ -357,12 +345,23 @@ class Window(pyglet.window.Window):
         self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
         # 着色器
         self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
-        self.skybox_shader = SkyboxShader(skybox_vertex_shader_code, skybox_fragment_shader_code)
+        self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code)
         # VBO id
         self.vbo_id = {}
+        self.vao_id = {}
         self.vbo_size = {}
         # 函数字典
         self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
+        # 生成天空盒顶点数据
+        vertex = []
+        x, y, z = 0, 0, 0
+        for i in range(0, 360):
+            x1, z1 = math.cos(math.radians(i)) * 16 + x, math.sin(math.radians(i)) * 16 + z
+            x2, z2 = math.cos(math.radians(i + 1)) * 16 + x, math.sin(math.radians(i + 1)) * 16 + z
+            vertex.extend((x1, y - 16, z1, x1, y + 16, z1, x2, y + 16, z2, x2, y - 16, z2))
+        vertex.extend((x - 16, y - 16, z - 16, x - 16, y - 16, z + 16, x + 16, y - 16, z + 16, x + 16, y - 16, z - 16))
+        vertex.extend((x - 16, y + 16, z - 16, x - 16, y + 16, z + 16, x + 16, y + 16, z + 16, x + 16, y + 16, z - 16))
+        self.sky_box = pyglet.graphics.vertex_list(len(vertex) // 3, ('v3f', vertex))
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
@@ -380,8 +379,24 @@ class Window(pyglet.window.Window):
     def update_vbo_data(self, x, y):
         if (x, y) not in self.vbo_id:
             vbo_id = GLuint(0)
+            vao_id = GLuint(0)
             glGenBuffers(1, ctypes.byref(vbo_id))
+            glGenVertexArrays(1, ctypes.byref(vao_id))
             self.vbo_id[(x, y)] = vbo_id
+            self.vao_id[(x, y)] = vao_id
+            glBindVertexArray(vao_id)
+            glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
+            # a_pos (location 0)
+            glEnableVertexAttribArray(0)
+            # a_tex_coords (location 1)
+            glEnableVertexAttribArray(1)
+            # draw_flag (location 2)
+            glEnableVertexAttribArray(2)
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(0 * 4))
+            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(3 * 4))
+            glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(6 * 4))
+            glBindVertexArray(0)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
         vbo_id = self.vbo_id[(x, y)]
         glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
         self.world.lock_world_mutex()
@@ -390,7 +405,7 @@ class Window(pyglet.window.Window):
         glBufferData(GL_ARRAY_BUFFER, data[1] * ctypes.sizeof(GLfloat), data_ptr, GL_STATIC_DRAW)
         self.world.unlock_world_mutex()
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-        self.vbo_size[(x, y)] = data[1] * 4
+        self.vbo_size[(x, y)] = data[1] // 7
 
     def update_shown(self, x, y, z):
         vertex_data = cube_vertices(x, y, z, 0.5)
@@ -842,11 +857,6 @@ class Window(pyglet.window.Window):
         x, y = self.rotation
         glRotatef(x, 0, 1, 0)
         glRotatef(-y, math.cos(math.radians(x)), 0, math.sin(math.radians(x)))
-        x, y, z = self.position
-        y += 1.2
-        if self.shift and not self.flying:
-            y -= 0.5
-        glTranslatef(-x, -y, -z)
 
     def on_draw(self):
         """ Called by pyglet to draw the canvas.
@@ -858,29 +868,22 @@ class Window(pyglet.window.Window):
         glDepthMask(GL_FALSE)
         self.draw_sky()
         glDepthMask(GL_TRUE)
+        x, y, z = self.position
+        y += 1.2
+        if self.shift and not self.flying:
+            y -= 0.5
+        glTranslatef(-x, -y, -z)
         sector = (int(self.position[0]) // 16, int(self.position[2]) // 16)
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
         self.block_shader.bind(self.render_distance * 16 - 16, self.position)
-        # a_pos (location 0)
-        glEnableVertexAttribArray(0)
-        # a_tex_coords (location 1)
-        glEnableVertexAttribArray(1)
-        # draw_flag (location 2)
-        glEnableVertexAttribArray(2)
-        for key in self.vbo_id:
+        for key in self.vao_id:
             if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
                 continue
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_id[key])
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(0 * 4))
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(3 * 4))
-            glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, ctypes.sizeof(GLfloat) * 7, ctypes.c_void_p(6 * 4))
+            glBindVertexArray(self.vao_id[key])
             glDrawArrays(GL_QUADS, 0, self.vbo_size[key])
-        glDisableVertexAttribArray(0)
-        glDisableVertexAttribArray(1)
-        glDisableVertexAttribArray(2)
-        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glBindVertexArray(0)
         self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()
@@ -896,6 +899,9 @@ class Window(pyglet.window.Window):
             key = '.'.join(key)
             if (self.level == key):
                 self.buttons[origin_key].draw(self.mouse_position)
+        err = glGetError()
+        if err != GL_NO_ERROR:
+            print(f'OpenGL Error: {err}')
 
     def draw_focused_block(self):
         """ Draw black edges around the block that is currently under the
@@ -919,16 +925,8 @@ class Window(pyglet.window.Window):
         """ 绘制天空盒
 
         """
-        vertex = []
-        x, y, z = self.position
-        for i in range(0, 360):
-            x1, z1 = math.cos(math.radians(i)) * 16 + x, math.sin(math.radians(i)) * 16 + z
-            x2, z2 = math.cos(math.radians(i + 1)) * 16 + x, math.sin(math.radians(i + 1)) * 16 + z
-            vertex.extend((x1, y - 16, z1, x1, y + 16, z1, x2, y + 16, z2, x2, y - 16, z2))
-        vertex.extend((x - 16, y - 16, z - 16, x - 16, y - 16, z + 16, x + 16, y - 16, z + 16, x + 16, y - 16, z - 16))
-        vertex.extend((x - 16, y + 16, z - 16, x - 16, y + 16, z + 16, x + 16, y + 16, z + 16, x + 16, y + 16, z - 16))
-        self.skybox_shader.bind(self.position)
-        pyglet.graphics.draw(len(vertex) // 3, GL_QUADS, ('v3f', vertex))
+        self.skybox_shader.bind()
+        self.sky_box.draw(GL_QUADS)
         self.skybox_shader.unbind()
 
 window = Window(width=960, height=540, caption='Minecraft', resizable=True)

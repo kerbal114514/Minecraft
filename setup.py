@@ -18,7 +18,7 @@ ext_modules = [
         library_dirs=[FASTNOISE2_LIB_DIR],
         # 3. 指定要链接的库名 (不需要加 lib 前缀和 .a/.lib 后缀)
         libraries=["FastNoise"],
-        # 4. 静态链接宏定义 (必须与 MCworld.cpp 中不需要定义)
+        # 4. 静态链接宏定义 (MCworld.cpp 中不需要定义)
         define_macros=[('FASTNOISE_STATIC_LIB', None)],
     ),
 ]
