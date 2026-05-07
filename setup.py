@@ -20,8 +20,6 @@ ext_modules = [
         libraries=["FastNoise"],
         # 4. 静态链接宏定义 (MCworld.cpp 中不需要定义)
         define_macros=[('FASTNOISE_STATIC_LIB', None)],
-        # 直接O2会段错误
-        extra_compile_args=['-fno-inline-functions']
     ),
 ]
 

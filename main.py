@@ -326,6 +326,8 @@ class Window(pyglet.window.Window):
         self.shown_sectors = set()
         self.loaded_sectors = set()
         # 注册碰撞箱
+        self.world.set_block_entity_box_to_none('block.minecraft.dev.air')
+        self.world.set_block_entity_box_to_none('block.minecraft.dev.sector_not_loaded')
         self.world.add_block_entity_box('block.minecraft.nature.grass_block', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_block_entity_box('block.minecraft.nature.dirt', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_block_entity_box('block.minecraft.nature.bedrock', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)

@@ -19,6 +19,12 @@ using namespace std;
 #define get_sector(x) ((x >= 0) ? (x / 16) : ((x - 15) / 16))
 using ull = unsigned long long;
 
+#ifdef _MSC_VER
+#define NOINLINE __declspec(noinline)
+#else
+#define NOINLINE __attribute__((noinline))
+#endif
+
 const map<string, string> emptyNBT;
 
 int FACES[6][3] =
@@ -179,6 +185,7 @@ struct Sector
 {
     Block* blocks;
     int* data;
+    unsigned short* biome;
     GL_QUADS_vbo_data vertex_data_struct;
     //                   方块坐标        之前的渲染状态  面的id
     unordered_map<tuple<int, int, int>, pair<ull, vector<int>>, Sector_block_pos_hash> shown;
@@ -186,12 +193,14 @@ struct Sector
     {
         blocks = new Block[16 * 128 * 16];    // (x, y, z)为blocks[x * 16 * 128 + y * 16 + z]
         data = new int[16 * 16];    // (x, z)为data[x * 16 + z]
+        biome = new unsigned short[16 * 16];
         fill(blocks, blocks + 16 * 128 * 16, air);
     }
     ~Sector()
     {
         delete[] blocks;
         delete[] data;
+        delete[] biome;
     }
 };
 
@@ -232,7 +241,7 @@ struct entity_box
     auto operator<=>(const entity_box&) const = default;
 };
 
-bool AABB(const entity_box &a, const entity_box &b, Pos da, Pos db)
+inline bool AABB(const entity_box &a, const entity_box &b, Pos da, Pos db)
 {
     /* 如果没有碰撞返回False */
     if (a.maxx + da.x < b.minx + db.x || b.maxx + db.x < a.minx + da.x || a.maxy + da.y < b.miny + db.y || b.maxy + db.y < a.miny + da.y || a.maxz + da.z < b.minz + db.z || b.maxz + db.z < a.minz + da.z)
@@ -240,7 +249,7 @@ bool AABB(const entity_box &a, const entity_box &b, Pos da, Pos db)
     return true;
 }
 
-float landscape_calc(float n)
+inline float terrain_fluctuate_calc(float n)
 {
     if (n <= 0.3)
         return 1.5;
@@ -250,7 +259,7 @@ float landscape_calc(float n)
         return 14;
 }
 
-float hole_calc(int n)    // n是高度
+inline float hole_calc(int n)    // n是高度
 {
     if (n < 10)
         return n * 0.1f;
@@ -262,10 +271,28 @@ float hole_calc(int n)    // n是高度
         return 0.0f;
 }
 
-float hash2D(int x, int z, int seed) {
-    unsigned int n = seed + x * 374761393 + z * 668265263;
-    n = (n ^ (n >> 13)) * 1274126177;
+inline float hash2D(int x, int z, int seed) {
+    unsigned int n = (unsigned int)seed + (unsigned int)x * 374761393u + (unsigned int)z * 668265263u;
+    n = (n ^ (n >> 13)) * 1274126177u;
     return (float)((n ^ (n >> 16)) & 0x7fffffff) / 0x7fffffff;
+}
+
+const string biome_id[] =
+{
+    "biome.minecraft.plain",
+    "biome.minecraft.mountain",
+    "biome.minecraft.forest",
+    "biome.minecraft.highland",
+};
+// 参数范围 [-1, 1]
+//                                  整体高度        地形起伏         植被（树）密度      雨量
+inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
+{
+    if (-1 <= altitude && altitude <  0 && -1 <= fluctuate && fluctuate <  0 && -1 <= tree_density && tree_density <  0) return 0u;    // plain
+    if (-1 <= altitude && altitude <  1 &&  0 <= fluctuate && fluctuate <= 1 && -1 <= tree_density && tree_density <= 1) return 1u;    // mountain
+    if (-1 <= altitude && altitude <  0 && -1 <= fluctuate && fluctuate <  0 &&  0 <= tree_density && tree_density <= 1) return 2u;    // forest
+    if ( 0 <= altitude && altitude <  1 && -1 <= fluctuate && fluctuate <  0 && -1 <= tree_density && tree_density <= 1) return 3u;    // highland
+    return -1u;
 }
 
 struct World
@@ -446,6 +473,8 @@ struct World
                 for (const entity_box &b : entity_entity_boxes["entity.minecraft.player"])
                     if (AABB(a, b, {(double)x, (double)y, (double)z}, position_local))
                     {
+                        if (block->has_NBT)
+                            delete block->NBT;
                         (*block) = air;
                         return;
                     }
@@ -493,7 +522,7 @@ struct World
         }
     }
 
-    void set_shown(int x, int y, int z, ull shown)
+    NOINLINE void set_shown(int x, int y, int z, ull shown)
     {
         // 不加锁，调用这个函数一定要在外面加锁(world_mutex, shown_mutex)
         if (find_block(x, y, z)->shown == shown)
@@ -515,20 +544,24 @@ struct World
     void generate_sector(int dx, int dy)
     {
         Sector* sector = new Sector;
-        float* noise_generate_height_map1 = new float[16 * 16];
-        float* noise_generate_height_map2 = new float[16 * 16];
-        float* noise_generate_height_map3 = new float[16 * 16];
-        float* noise_generate_height_map4 = new float[16 * 16];
+        //                                     整体高度        地形起伏         植被（树）密度      雨量
+        // inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
+        float* noise_altitude = new float[16 * 16];
+        float* noise_fluctuate = new float[16 * 16];
+        float* noise_terrain = new float[16 * 16];
+        float* noise_tree_density = new float[16 * 16];
+        float* noise_rain = new float[16 * 16];
         float* cave_noise = new float[5 * 33 * 5];
         float* cave_noise_mix = new float[16 * 128 * 16];    // 差值后的洞穴噪声
         int old_dx = dx, old_dy = dy;
         dx *= 16, dy *= 16;
-        float h1, h2, tmp;
+        float tmp;
         int height1, height2;
-        noise->GenUniformGrid2D(noise_generate_height_map1, dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed);    // 群系
-        noise->GenUniformGrid2D(noise_generate_height_map2, dx, dy, 16, 16, 1, 1, seed + 1);    // 大地形
-        noise->GenUniformGrid2D(noise_generate_height_map3, dx * 5, dy * 5, 16, 16, 5, 5, seed + 2);    // 小地形
-        noise->GenUniformGrid2D(noise_generate_height_map4, dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 4);    // 整体趋势
+        noise->GenUniformGrid2D(noise_altitude, dx * 0.05f, dy * 0.05f, 16, 16, 0.05f, 0.05f, seed);
+        noise->GenUniformGrid2D(noise_fluctuate, dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed + 1);
+        noise->GenUniformGrid2D(noise_terrain, dx, dy, 16, 16, 1, 1, seed + 1);
+        noise->GenUniformGrid2D(noise_tree_density, dx * 0.5f, dy * 0.5f, 16, 16, 0.5f, 0.5f, seed + 2);
+        noise->GenUniformGrid2D(noise_rain, dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 3);
         noise->GenUniformGrid3D(cave_noise, dx / 16 * 5 * 4, seed / 1048576, dy / 16 * 5 * 4, 5, 33, 5, 5.0f, 20.0f, 5.0f, seed);    // 洞穴的3D噪声，后期用线性差值处理
         float n000, n001, n010, n011, n100, n101, n110, n111, u, v, w;
         for (int x = 0, nx, ny, nz; x != 16; ++x)
@@ -568,25 +601,25 @@ struct World
         for (int x = 0; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
             {
-                tmp = (noise_generate_height_map1[z * 16 + x] + 1) * 0.5;
-                h1 = (noise_generate_height_map2[z * 16 + x] + 1) * landscape_calc(tmp) + 44 + tmp * 20 + noise_generate_height_map4[z * 16 + x] * 20;
-                h2 = noise_generate_height_map3[z * 16 + x] * 0.5 + h1 + 5;
-                height1 = h1, height2 = h2;
+                height1 = noise_altitude[z * 16 + x] * 30 + 40 + (noise_terrain[z * 16 + x] + 1) * terrain_fluctuate_calc(noise_fluctuate[z * 16 + x] * 0.5f + 0.5f);
+                height2 = height1 + 5;
                 sector->blocks[(x * 16 + z) * 128].id = 5;    //bedrock
                 for (int y = 1; y < height1; ++y)
-                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.4)
+                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.6)
                         sector->blocks[(x * 16 + z) * 128 + y].id = 4;    //stone
                 for (int y = height1; y < height2; ++y)
-                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.4)
+                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.6)
                         sector->blocks[(x * 16 + z) * 128 + y].id = 3;    //dirt
-                if (cave_noise_mix[(x * 16 + z) * 128 + height2] <= 0.4)
+                if (cave_noise_mix[(x * 16 + z) * 128 + height2] <= 0.6)
                     sector->blocks[(x * 16 + z) * 128 + height2].id = 2;    //grass_block
                 sector->data[x * 16 + z] = height2;
+                sector->biome[x * 16 + z] = get_biome(noise_altitude[z * 16 + x], noise_fluctuate[z * 16 + x], noise_tree_density[z * 16 + x], noise_rain[z * 16 + x]);
             }
-        delete[] noise_generate_height_map1;
-        delete[] noise_generate_height_map2;
-        delete[] noise_generate_height_map3;
-        delete[] noise_generate_height_map4;
+        delete[] noise_altitude;
+        delete[] noise_fluctuate;
+        delete[] noise_terrain;
+        delete[] noise_tree_density;
+        delete[] noise_rain;
         delete[] cave_noise;
         delete[] cave_noise_mix;
         lock_guard<recursive_mutex> lock_world(world_mutex);
@@ -611,17 +644,17 @@ struct World
             operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy - 1));
     }
 
-    bool has_tree(int x, int z)
+    bool has_tree(int x, int z, float tree_calc_value)
     {
         float hash = hash2D(x, z, seed);
-        if (hash <= 0.99)
+        if (hash <= 1.0f - tree_calc_value)
             return false;
-        for (int dx = -5; dx <= 5; ++dx)
-            for (int dz = -5; dz <= 5; ++dz)
+        for (int dx = -3; dx <= 3; ++dx)
+            for (int dz = -3; dz <= 3; ++dz)
             {
                 if (dx == 0 && dz == 0)
                     continue;
-                if (dx * dx + dz * dz <= 25 && hash2D(x + dx, z + dz, seed) >= hash)
+                if (dx * dx + dz * dz <= 9 && hash2D(x + dx, z + dz, seed) >= hash)
                     return false;
             }
         return true;
@@ -633,11 +666,31 @@ struct World
         lock_guard<recursive_mutex> lock_shown(shown_mutex);
         Sector* sector = world[{sx, sy}];
         Block* block;
+        unsigned int tmp;
+        float tree_density;
         for (int x = 0, y; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
             {
                 y = sector->data[x * 16 + z];
-                if (has_tree(sx * 16 + x, sy * 16 + z) && sector->blocks[(x * 16 + z) * 128 + y].id != 1)
+                tmp = sector->biome[x * 16 + z];
+                switch(tmp)
+                {
+                    case 0u:    // plain
+                        tree_density = 0.0015f;
+                        break;
+                    case 1u:    // mountain
+                        tree_density = 0.005f;
+                        break;
+                    case 2u:    // forest
+                        tree_density = 0.03f;
+                        break;
+                    case 3u:    // highland
+                        tree_density = 0.0f;
+                        break;
+                    default:
+                        tree_density = 0;
+                }
+                if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[(x * 16 + z) * 128 + y].id != 1)
                 {
                     for (int dy = 1; dy < 6; ++dy)
                     {
@@ -825,12 +878,17 @@ struct World
         block_entity_boxes[name].insert({minx, maxx, miny, maxy, minz, maxz});
     }
 
+    void set_block_entity_box_to_none(string name)
+    {
+        block_entity_boxes[name] = set<entity_box>();
+    }
+
     void add_entity_entity_box(string name, double minx, double maxx, double miny, double maxy, double minz, double maxz)
     {
         entity_entity_boxes[name].insert({minx, maxx, miny, maxy, minz, maxz});
     }
 
-    bool intersect(string entity, double x, double y, double z)    // 如果与方块碰撞，返回true
+    bool intersect(string entity, double x, double y, double z) const    // 如果与方块碰撞，返回true
     {
         int ix = x, iy = y, iz = z;
         int nx, ny, nz;
@@ -842,15 +900,15 @@ struct World
                     nx = ix + dx, ny = iy + dy, nz = iz + dz;
                     if (ny >= 128 || ny < 0)
                         continue;
-                    for (entity_box i : entity_entity_boxes[entity])
-                        for (entity_box j : block_entity_boxes[block_id[find_block(nx, ny, nz)->id]])
+                    for (entity_box i : entity_entity_boxes.at(entity))
+                        for (entity_box j : block_entity_boxes.at(block_id[find_block(nx, ny, nz)->id]))
                             if (AABB(i, j, {x, y, z}, {(double)nx, (double)ny, (double)nz}))
                                 return true;
                 }
         return false;
     }
 
-    pybind11::tuple hit_test(double x, double y, double z, double dx, double dy, double dz, double max_distance)
+    pybind11::tuple hit_test(double x, double y, double z, double dx, double dy, double dz, double max_distance) const
     {
         int m = 16;    // 精度
         int px = x, py = y, pz = z;
@@ -871,10 +929,10 @@ struct World
         return pybind11::make_tuple(pybind11::none(), pybind11::none());
     }
 
-    pybind11::tuple get_sector_vbo_data_ptr(int x, int y)
+    pybind11::tuple get_sector_vbo_data_ptr(int x, int y) const
     {
         // 第一个是指针，第二个是长度
-        return pybind11::make_tuple(reinterpret_cast<uintptr_t>(world[{x, y}]->vertex_data_struct.data.data()), world[{x, y}]->vertex_data_struct.data.size());
+        return pybind11::make_tuple(reinterpret_cast<uintptr_t>(world.at({x, y})->vertex_data_struct.data.data()), world.at({x, y})->vertex_data_struct.data.size());
     }
 };
 
@@ -893,6 +951,7 @@ PYBIND11_MODULE(MCworld, m)
              "x"_a, "y"_a, "z"_a, "auto_process"_a=true)
         .def("add_transparent_block", &World::add_transparent_block)
         .def("add_block_entity_box", &World::add_block_entity_box)
+        .def("set_block_entity_box_to_none", &World::set_block_entity_box_to_none)
         .def("add_entity_entity_box", &World::add_entity_entity_box)
         .def("intersect", &World::intersect)
         .def("hit_test", &World::hit_test)
