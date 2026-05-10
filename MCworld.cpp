@@ -9,11 +9,13 @@
 #include <string>
 #include <queue>
 #include <list>
+#include <bitset>
 #include <format>
 #include <algorithm>
 #include <set>
 #include <tuple>
 #include <chrono>
+#include <cmath>
 #include <FastNoise/FastNoise.h>
 using namespace std;
 #define get_sector(x) ((x >= 0) ? (x / 16) : ((x - 15) / 16))
@@ -295,18 +297,37 @@ inline unsigned int get_biome(float altitude, float fluctuate, float tree_densit
     return -1u;
 }
 
+struct LCG
+{
+    unsigned int now;
+    LCG(unsigned int seed)
+    {
+        now = seed;
+    }
+    inline unsigned int next()
+    {
+        return (now = now * 1664525u + 1013904223u);
+    }
+};
+
+inline vector<float> normalize(float x, float y, float z)
+{
+    float tmp = sqrt(x * x + y * y + z * z);
+    return {x / tmp, y / tmp, z / tmp};
+}
+
 struct World
 {
     unordered_map<Sector_pos, Sector*, Sector_pos_hash> world;
     int stoped_threads = 0;
     int simulate_distance;
-    unordered_set<Sector_pos, Sector_pos_hash> simulate_sectors;
-    unordered_set<Sector_pos, Sector_pos_hash> decorate_sectors;
+    unordered_set<Sector_pos, Sector_pos_hash> simulate_sectors, decorate_sectors, generate_holes_sectors;
     list<string> operations;    //双链表，可以O(1)连接两个链表，在generate_sector中使用
     map<string, set<entity_box>> block_entity_boxes;
     map<string, set<entity_box>> entity_entity_boxes;
     Pos position;
-    unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors;
+    unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes;
+    unordered_map<Sector_pos, bitset<16 * 128 * 16>, Sector_pos_hash> holes;    // true即洞穴
     FastNoise::SmartNode<> noise;
     int seed;
     // 添加互斥锁，使用 recursive_mutex 允许同一个线程多次加锁
@@ -325,6 +346,10 @@ struct World
             for (int y = -simulate_distance; y <= simulate_distance; ++y)
                 if (x * x + y * y <= simulate_distance * simulate_distance)
                     simulate_sectors.insert({x, y});
+        for (int x = -simulate_distance - 5; x <= simulate_distance + 5; ++x)
+            for (int y = -simulate_distance - 5; y <= simulate_distance + 5; ++y)
+                if (x * x + y * y <= (simulate_distance + 5) * (simulate_distance + 5))
+                    generate_holes_sectors.insert({x, y});
         for (int x = -simulate_distance; x <= simulate_distance; ++x)
             for (int y = -simulate_distance; y <= simulate_distance; ++y)
             {
@@ -341,6 +366,11 @@ struct World
                 if (flag)
                     decorate_sectors.insert({x, y});
             }
+        for (Sector_pos hole_pos : generate_holes_sectors)
+        {
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+            generated_holes.insert(hole_pos);
+        }
     };
 
     ~World()
@@ -544,6 +574,8 @@ struct World
     void generate_sector(int dx, int dy)
     {
         Sector* sector = new Sector;
+        bitset<16 * 128 * 16> hole = holes[{dx, dy}];
+        holes.erase({dx, dy});
         //                                     整体高度        地形起伏         植被（树）密度      雨量
         // inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
         float* noise_altitude = new float[16 * 16];
@@ -551,19 +583,19 @@ struct World
         float* noise_terrain = new float[16 * 16];
         float* noise_tree_density = new float[16 * 16];
         float* noise_rain = new float[16 * 16];
-        float* cave_noise = new float[5 * 33 * 5];
-        float* cave_noise_mix = new float[16 * 128 * 16];    // 差值后的洞穴噪声
+        /*float* cave_noise = new float[5 * 33 * 5];
+        float* cave_noise_mix = new float[16 * 128 * 16];    // 差值后的洞穴噪声*/
         int old_dx = dx, old_dy = dy;
         dx *= 16, dy *= 16;
-        float tmp;
+        //float tmp;
         int height1, height2;
         noise->GenUniformGrid2D(noise_altitude, dx * 0.05f, dy * 0.05f, 16, 16, 0.05f, 0.05f, seed);
         noise->GenUniformGrid2D(noise_fluctuate, dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed + 1);
         noise->GenUniformGrid2D(noise_terrain, dx, dy, 16, 16, 1, 1, seed + 1);
         noise->GenUniformGrid2D(noise_tree_density, dx * 0.5f, dy * 0.5f, 16, 16, 0.5f, 0.5f, seed + 2);
         noise->GenUniformGrid2D(noise_rain, dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 3);
-        noise->GenUniformGrid3D(cave_noise, dx / 16 * 5 * 4, seed / 1048576, dy / 16 * 5 * 4, 5, 33, 5, 5.0f, 20.0f, 5.0f, seed);    // 洞穴的3D噪声，后期用线性差值处理
-        float n000, n001, n010, n011, n100, n101, n110, n111, u, v, w;
+        //noise->GenUniformGrid3D(cave_noise, dx / 16 * 5 * 4, seed / 1048576, dy / 16 * 5 * 4, 5, 33, 5, 5.0f, 20.0f, 5.0f, seed);    // 洞穴的3D噪声，后期用线性差值处理
+        /*float n000, n001, n010, n011, n100, n101, n110, n111, u, v, w;
         for (int x = 0, nx, ny, nz; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
                 for (int y = 0; y < 128; ++y)
@@ -597,7 +629,7 @@ struct World
                     tmp += n110 * (u) * (v) * (1 - w);
                     tmp += n111 * (u) * (v) * (w);
                     cave_noise_mix[(x * 16 + z) * 128 + y] = tmp * hole_calc(y);
-                }
+                }*/
         for (int x = 0; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
             {
@@ -605,12 +637,12 @@ struct World
                 height2 = height1 + 5;
                 sector->blocks[(x * 16 + z) * 128].id = 5;    //bedrock
                 for (int y = 1; y < height1; ++y)
-                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.6)
+                    if (!hole[(x * 16 + z) * 128 + y])
                         sector->blocks[(x * 16 + z) * 128 + y].id = 4;    //stone
                 for (int y = height1; y < height2; ++y)
-                    if (cave_noise_mix[(x * 16 + z) * 128 + y] <= 0.6)
+                    if (!hole[(x * 16 + z) * 128 + y])
                         sector->blocks[(x * 16 + z) * 128 + y].id = 3;    //dirt
-                if (cave_noise_mix[(x * 16 + z) * 128 + height2] <= 0.6)
+                if (!hole[(x * 16 + z) * 128 + height2])
                     sector->blocks[(x * 16 + z) * 128 + height2].id = 2;    //grass_block
                 sector->data[x * 16 + z] = height2;
                 sector->biome[x * 16 + z] = get_biome(noise_altitude[z * 16 + x], noise_fluctuate[z * 16 + x], noise_tree_density[z * 16 + x], noise_rain[z * 16 + x]);
@@ -620,8 +652,8 @@ struct World
         delete[] noise_terrain;
         delete[] noise_tree_density;
         delete[] noise_rain;
-        delete[] cave_noise;
-        delete[] cave_noise_mix;
+        /*delete[] cave_noise;
+        delete[] cave_noise_mix;*/
         lock_guard<recursive_mutex> lock_world(world_mutex);
         world[{old_dx, old_dy}] = sector;
         ull exp;
@@ -685,7 +717,7 @@ struct World
                         tree_density = 0.03f;
                         break;
                     case 3u:    // highland
-                        tree_density = 0.0f;
+                        tree_density = 0.0005f;
                         break;
                     default:
                         tree_density = 0;
@@ -752,30 +784,38 @@ struct World
         operations.push_back(format("update_vbo_data {} {}", sx, sy - 1));
     }
 
-    void show_sector(int dx, int dy)
+    // 洞穴最大长度：64, 每次以玩家为圆心，simulate_distance + 5为半径，在圆上每个区块（随机高度）生成洞穴。
+    void generate_holes(float x, float y, float z)
     {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
-        Sector* sector = world[{dx, dy}];
-        dx *= 16, dy *= 16;
-        for (int x = 0; x != 16; ++x)
-            for (int z = 0; z != 16; ++z)
-                for (int y = 0; y != 128; ++y)
-                    if (sector->blocks[(x * 16 + z) * 128 + y].shown)
-                        set_shown(dx + x, y, dy + z, sector->blocks[(x * 16 + z) * 128 + y].shown);
-    }
-
-    void hide_sector(int dx, int dy)
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
-        Sector* sector = world[{dx, dy}];
-        dx *= 16, dy *= 16;
-        for (int x = 0; x != 16; ++x)
-            for (int z = 0; z != 16; ++z)
-                for (int y = 0; y != 128; ++y)
-                    if (sector->blocks[(x * 16 + z) * 128 + y].shown)
-                        set_shown(dx + x, y, dy + z, 0ull);
+        //LCG rng((unsigned int)((hash2D(x, y) + hash2D(y, z) + hash2D(z, x)) * 1431655765));    // (2 ^ 32 - 1) / 3
+        float dx[64], dy[64], dz[64], size[64];
+        int length = (hash2D(x, y, seed) + hash2D(y, z, seed) + hash2D(z, x, seed)) * 64 / 6 + 32;    // [32, 64]
+        noise->GenUniformGrid2D(dx, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed);
+        noise->GenUniformGrid2D(dy, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 1);
+        noise->GenUniformGrid2D(dz, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed + 2);
+        noise->GenUniformGrid2D(size, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 3);
+        vector<float> tmp;
+        for (int i = 0, size_int, x_int, y_int, z_int, final_x, final_y, final_z, sector_x, sector_y; i < length; ++i)
+        {
+            tmp = normalize(dx[i], dy[i] * 0.5, dz[i]);
+            x += tmp[0], y += tmp[1], z += tmp[2];
+            x_int = x, y_int = y, z_int = z;
+            size_int = (int)(size[i] + 3);
+            for (int bx = -size_int; bx <= size_int; ++bx)
+                for (int by = -size_int; by <= size_int; ++by)
+                    for (int bz = -size_int; bz <= size_int; ++bz)
+                        if (bx * bx + by * by + bz * bz <= size_int * size_int)
+                        {
+                            final_x = x_int + bx, final_y = y_int + by, final_z = z_int + bz;
+                            if (final_y <= 0 || final_y >= 128)
+                                break;
+                            sector_x = (final_x >= 0) ? (final_x / 16) : ((final_x - 15) / 16);
+                            sector_y = (final_z >= 0) ? (final_z / 16) : ((final_z - 15) / 16);
+                            final_x = (final_x % 16 + 16) % 16;
+                            final_z = (final_z % 16 + 16) % 16;
+                            holes[{sector_x, sector_y}][(final_x * 16 + final_z) * 128 + final_y] = true;
+                        }
+        }
     }
 
     void process_sector_thread()
@@ -791,11 +831,21 @@ struct World
             }
             int nx = (x >= 0) ? (x / 16) : ((x - 15) / 16);
             int ny = (z >= 0) ? (z / 16) : ((z - 15) / 16);
-            Sector_pos player_sector = {nx, ny};
-            // 加载区块
+            Sector_pos player_sector = {nx, ny}, now;
+            // 生成洞穴
+            for (Sector_pos ds : generate_holes_sectors)
+            {
+                now = player_sector + ds;
+                if (!generated_holes.count(now))
+                {
+                    generated_holes.insert(now);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                }
+            }
+            // 生成区块
             for (Sector_pos ds : simulate_sectors)
             {
-                Sector_pos now = player_sector + ds;
+                now = player_sector + ds;
                 if (!generated_sectors.count(now))
                 {
                     generated_sectors.insert(now);
@@ -803,38 +853,16 @@ struct World
                     generate_sector(now.x, now.y);
                 }
             }
+            // 装饰区块
             for (Sector_pos ds : decorate_sectors)
             {
-                Sector_pos now = player_sector + ds;
+                now = player_sector + ds;
                 if (!decorated_sectors.count(now))
                 {
                     decorated_sectors.insert(now);
                     decorate_sector(now.x, now.y);
                 }
             }
-            // 现在不需要，只需要在python中超出范围的不渲染就行了
-            /*// 显示/隐藏区块
-            ought_shown.clear(), show.clear(), hide.clear();
-            operations_local.clear();
-            for (Sector_pos ds : simulate_sectors)
-                ought_shown.insert(player_sector + ds);
-            for (Sector_pos i : ought_shown)
-                if (shown_sectors.count(i) == 0)
-                    show.insert(i);
-            for (Sector_pos i : shown_sectors)
-                if (ought_shown.count(i) == 0)
-                    hide.insert(i);
-            // 先隐藏再显示，python shown字典元素少，速度快
-            for (Sector_pos i : hide)
-            {
-                shown_sectors.erase(i);
-                hide_sector(i.x, i.y);
-            }
-            for (Sector_pos i : show)
-            {
-                shown_sectors.insert(i);
-                show_sector(i.x, i.y);
-            }*/
             this_thread::sleep_for(chrono::milliseconds(300));
         }
         ++stoped_threads;
