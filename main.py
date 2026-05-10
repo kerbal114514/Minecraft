@@ -302,7 +302,7 @@ class Window(pyglet.window.Window):
         # right, and 0 otherwise.
         # 按键
         self.strafe = [0, 0]
-        self.position = (0, 80, 0)
+        self.position = (0, 200, 0)
         self.flying = False
         self.delta = [0, 0, 0]
         # First element is rotation of the player in the x-z plane (ground
@@ -466,7 +466,7 @@ class Window(pyglet.window.Window):
             for _ in range(gamerule['random_tick_speed']):
                 sdx = random.randint(0, 15)
                 sdz = random.randint(0, 15)
-                sdy = random.randint(0, 127)
+                sdy = random.randint(0, 255)
                 pos = (x * 16 + sdx, sdy, y * 16 + sdz)
                 if (self.world.get_block(*pos) != 1 and self.world.get_block(*pos) != 0):
                     if block_random_tick_func[block_id[self.world.get_block(*pos)]](self, *pos):

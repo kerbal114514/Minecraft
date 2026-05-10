@@ -141,7 +141,7 @@ struct Sector_block_pos_hash
 {
     size_t operator()(const tuple<int, int, int>& p) const
     {
-        return ((get<0>(p) % 16 + 16) % 16 * 16 + (get<2>(p) % 16 + 16) % 16) * 128 + get<1>(p);
+        return ((get<0>(p) % 16 + 16) % 16 * 16 + (get<2>(p) % 16 + 16) % 16) * 256 + get<1>(p);
     }
 };
 
@@ -193,10 +193,10 @@ struct Sector
     unordered_map<tuple<int, int, int>, pair<ull, vector<int>>, Sector_block_pos_hash> shown;
     Sector()
     {
-        blocks = new Block[16 * 128 * 16];    // (x, y, z)为blocks[x * 16 * 128 + y * 16 + z]
+        blocks = new Block[16 * 256 * 16];    // (x, y, z)为blocks[x * 16 * 256 + y * 16 + z]
         data = new int[16 * 16];    // (x, z)为data[x * 16 + z]
         biome = new unsigned short[16 * 16];
-        fill(blocks, blocks + 16 * 128 * 16, air);
+        fill(blocks, blocks + 16 * 256 * 16, air);
     }
     ~Sector()
     {
@@ -327,7 +327,7 @@ struct World
     map<string, set<entity_box>> entity_entity_boxes;
     Pos position;
     unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes;
-    unordered_map<Sector_pos, bitset<16 * 128 * 16>, Sector_pos_hash> holes;    // true即洞穴
+    unordered_map<Sector_pos, bitset<16 * 256 * 16>, Sector_pos_hash> holes;    // true即洞穴
     FastNoise::SmartNode<> noise;
     int seed;
     // 添加互斥锁，使用 recursive_mutex 允许同一个线程多次加锁
@@ -369,6 +369,7 @@ struct World
         for (Sector_pos hole_pos : generate_holes_sectors)
         {
             generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 32, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
             generated_holes.insert(hole_pos);
         }
     };
@@ -394,7 +395,7 @@ struct World
 
     Block* find_block(int x, int y, int z) const
     {
-        if (y < 0 || y >= 128)
+        if (y < 0 || y >= 256)
             return &sector_not_loaded;
         int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
         int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
@@ -402,7 +403,7 @@ struct World
         z = (z % 16 + 16) % 16;
         if (world.count({sector_x, sector_y}) == 0)    //区块没有加载
             return &sector_not_loaded;
-        return (world.at({sector_x, sector_y})->blocks) + ((x * 16 + z) * 128 + y);    // world[sector]不是const
+        return (world.at({sector_x, sector_y})->blocks) + ((x * 16 + z) * 256 + y);    // world[sector]不是const
     }
 
     ull exposed(int x, int y, int z) const
@@ -413,7 +414,7 @@ struct World
         for (int i = 0, dx, dy, dz; i < 6; ++i)
         {
             dx = FACES[i][0], dy = FACES[i][1], dz = FACES[i][2];
-            if (y + dy < 0 || y + dy > 127)
+            if (y + dy < 0 || y + dy >= 256)
                 ret |= (1ull << i);
             // 同样的透明方块之间的面一个隐藏，一个显示
             else if (transparent_blocks.count(find_block(x + dx, y + dy, z + dz)->id) && find_block(x + dx, y + dy, z + dz)->id != find_block(x, y, z)->id)
@@ -574,7 +575,7 @@ struct World
     void generate_sector(int dx, int dy)
     {
         Sector* sector = new Sector;
-        bitset<16 * 128 * 16> hole = holes[{dx, dy}];
+        bitset<16 * 256 * 16> hole = holes[{dx, dy}];
         holes.erase({dx, dy});
         //                                     整体高度        地形起伏         植被（树）密度      雨量
         // inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
@@ -584,7 +585,7 @@ struct World
         float* noise_tree_density = new float[16 * 16];
         float* noise_rain = new float[16 * 16];
         /*float* cave_noise = new float[5 * 33 * 5];
-        float* cave_noise_mix = new float[16 * 128 * 16];    // 差值后的洞穴噪声*/
+        float* cave_noise_mix = new float[16 * 256 * 16];    // 差值后的洞穴噪声*/
         int old_dx = dx, old_dy = dy;
         dx *= 16, dy *= 16;
         //float tmp;
@@ -598,7 +599,7 @@ struct World
         /*float n000, n001, n010, n011, n100, n101, n110, n111, u, v, w;
         for (int x = 0, nx, ny, nz; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
-                for (int y = 0; y < 128; ++y)
+                for (int y = 0; y < 256; ++y)
                 {
                     nx = x / 4, ny = y / 4, nz = z / 4;
                     n000 = cave_noise[(nz * 33 + ny) * 5 + nx];
@@ -628,22 +629,22 @@ struct World
                     tmp += n101 * (u) * (1 - v) * (w);
                     tmp += n110 * (u) * (v) * (1 - w);
                     tmp += n111 * (u) * (v) * (w);
-                    cave_noise_mix[(x * 16 + z) * 128 + y] = tmp * hole_calc(y);
+                    cave_noise_mix[(x * 16 + z) * 256 + y] = tmp * hole_calc(y);
                 }*/
         for (int x = 0; x != 16; ++x)
             for (int z = 0; z != 16; ++z)
             {
-                height1 = noise_altitude[z * 16 + x] * 30 + 40 + (noise_terrain[z * 16 + x] + 1) * terrain_fluctuate_calc(noise_fluctuate[z * 16 + x] * 0.5f + 0.5f);
+                height1 = noise_altitude[z * 16 + x] * 40 + 40 + 64 + (noise_terrain[z * 16 + x] + 1) * terrain_fluctuate_calc(noise_fluctuate[z * 16 + x] * 0.5f + 0.5f) + pow((noise_fluctuate[z * 16 + x] + 1) / 2, 2) * 20;
                 height2 = height1 + 5;
-                sector->blocks[(x * 16 + z) * 128].id = 5;    //bedrock
+                sector->blocks[(x * 16 + z) * 256].id = 5;    //bedrock
                 for (int y = 1; y < height1; ++y)
-                    if (!hole[(x * 16 + z) * 128 + y])
-                        sector->blocks[(x * 16 + z) * 128 + y].id = 4;    //stone
+                    if (!hole[(x * 16 + z) * 256 + y])
+                        sector->blocks[(x * 16 + z) * 256 + y].id = 4;    //stone
                 for (int y = height1; y < height2; ++y)
-                    if (!hole[(x * 16 + z) * 128 + y])
-                        sector->blocks[(x * 16 + z) * 128 + y].id = 3;    //dirt
-                if (!hole[(x * 16 + z) * 128 + height2])
-                    sector->blocks[(x * 16 + z) * 128 + height2].id = 2;    //grass_block
+                    if (!hole[(x * 16 + z) * 256 + y])
+                        sector->blocks[(x * 16 + z) * 256 + y].id = 3;    //dirt
+                if (!hole[(x * 16 + z) * 256 + height2])
+                    sector->blocks[(x * 16 + z) * 256 + height2].id = 2;    //grass_block
                 sector->data[x * 16 + z] = height2;
                 sector->biome[x * 16 + z] = get_biome(noise_altitude[z * 16 + x], noise_fluctuate[z * 16 + x], noise_tree_density[z * 16 + x], noise_rain[z * 16 + x]);
             }
@@ -661,7 +662,7 @@ struct World
         lock_guard<recursive_mutex> lock_shown(shown_mutex);
         for (int x = -1; x != 17; ++x)
             for (int z = -1; z != 17; ++z)
-                for (int y = 0; y != 128; ++y)
+                for (int y = 0; y != 256; ++y)
                     if ((exp = exposed(dx + x, y, dy + z)) != 0ull)
                         set_shown(dx + x, y, dy + z, exp);
         lock_guard<recursive_mutex> lock_operations(operations_mutex);
@@ -722,7 +723,7 @@ struct World
                     default:
                         tree_density = 0;
                 }
-                if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[(x * 16 + z) * 128 + y].id != 1)
+                if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[(x * 16 + z) * 256 + y].id != 1)
                 {
                     for (int dy = 1; dy < 6; ++dy)
                     {
@@ -807,13 +808,13 @@ struct World
                         if (bx * bx + by * by + bz * bz <= size_int * size_int)
                         {
                             final_x = x_int + bx, final_y = y_int + by, final_z = z_int + bz;
-                            if (final_y <= 0 || final_y >= 128)
+                            if (final_y <= 0 || final_y >= 256)
                                 break;
                             sector_x = (final_x >= 0) ? (final_x / 16) : ((final_x - 15) / 16);
                             sector_y = (final_z >= 0) ? (final_z / 16) : ((final_z - 15) / 16);
                             final_x = (final_x % 16 + 16) % 16;
                             final_z = (final_z % 16 + 16) % 16;
-                            holes[{sector_x, sector_y}][(final_x * 16 + final_z) * 128 + final_y] = true;
+                            holes[{sector_x, sector_y}][(final_x * 16 + final_z) * 256 + final_y] = true;
                         }
         }
     }
@@ -840,6 +841,7 @@ struct World
                 {
                     generated_holes.insert(now);
                     generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 32, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
                 }
             }
             // 生成区块
@@ -926,7 +928,7 @@ struct World
                 for (int dz = -2; dz <= 2; ++dz)
                 {
                     nx = ix + dx, ny = iy + dy, nz = iz + dz;
-                    if (ny >= 128 || ny < 0)
+                    if (ny >= 256 || ny < 0)
                         continue;
                     for (entity_box i : entity_entity_boxes.at(entity))
                         for (entity_box j : block_entity_boxes.at(block_id[find_block(nx, ny, nz)->id]))
@@ -944,7 +946,7 @@ struct World
         for (int i = 0, kx, ky, kz; i < max_distance * m; ++i)
         {
             kx = round(x), ky = round(y), kz = round(z);
-            if (ky < 0 || ky >= 128)
+            if (ky < 0 || ky >= 256)
             {
                 x = x + dx / m, y = y + dy / m, z = z + dz / m;
                 continue;
