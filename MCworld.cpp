@@ -22,9 +22,9 @@ using namespace std;
 using ull = unsigned long long;
 
 #ifdef _MSC_VER
-#define NOINLINE __declspec(noinline)
+#define NOINLINE [[msvc::noinline]]
 #else
-#define NOINLINE __attribute__((noinline))
+#define NOINLINE [[gnu::noinline]]
 #endif
 
 const map<string, string> emptyNBT;
@@ -91,7 +91,7 @@ const string block_id[] =
     "block.minecraft.nature.stone",//4
     "block.minecraft.nature.bedrock",//5
     "block.minecraft.wood.oak_log",//6
-    "block.minecraft.wood.oak_leaves",//7
+    "block.minecraft.leaves.oak_leaves",//7
 };
 const unordered_map<string, unsigned short> id_block =
 {
@@ -102,7 +102,7 @@ const unordered_map<string, unsigned short> id_block =
     {"block.minecraft.nature.stone", 4},
     {"block.minecraft.nature.bedrock", 5},
     {"block.minecraft.wood.oak_log", 6},
-    {"block.minecraft.wood.oak_leaves", 7},
+    {"block.minecraft.leaves.oak_leaves", 7},
 };
 const unordered_map<unsigned short, const vector<unsigned short>> textures =
 {
@@ -334,7 +334,6 @@ struct World
     mutable recursive_mutex world_mutex;    // world
     mutable recursive_mutex operations_mutex;    // operations
     mutable recursive_mutex position_mutex;    // position
-    mutable recursive_mutex shown_mutex;    // shown
 
     World(int seed_arg, int simulate_distance_arg)
     {
@@ -368,8 +367,8 @@ struct World
             }
         for (Sector_pos hole_pos : generate_holes_sectors)
         {
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 32, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 16, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 48, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
             generated_holes.insert(hole_pos);
         }
     };
@@ -436,7 +435,6 @@ struct World
     void check_neighbors(int x, int y, int z)
     {
         lock_guard<recursive_mutex> lock_world(world_mutex);
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
         for (int i = 0, dx, dy, dz, nx, ny, nz; i < 6; ++i)
         {
             dx = FACES[i][0], dy = FACES[i][1], dz = FACES[i][2];
@@ -449,8 +447,9 @@ struct World
     {
         int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
         int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
+        if (world.count({sector_x, sector_y}) == 0)
+            return;
         Sector* sector = world[{sector_x, sector_y}];
-        vector<vector<float>> vertex_data = cube_vertices((float)x, (float)y, (float)z, 0.5);
         ull mask;
         unsigned short id = find_block(x, y, z)->id;
         if (!sector->shown.count({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}))
@@ -509,7 +508,6 @@ struct World
                         (*block) = air;
                         return;
                     }
-            lock_guard<recursive_mutex> lock_shown(shown_mutex);
             set_shown(x, y, z, exposed(x, y, z));
             check_neighbors(x, y, z);
             lock_guard<recursive_mutex> lock_operations(operations_mutex);
@@ -528,7 +526,6 @@ struct World
     void remove_block(int x, int y, int z, bool auto_process=true)
     {
         lock_guard<recursive_mutex> lock_world(world_mutex);
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
         Block* block = find_block(x, y, z);
         if (block->id == 0 || block->id == 1)
             return;
@@ -553,9 +550,9 @@ struct World
         }
     }
 
-    NOINLINE void set_shown(int x, int y, int z, ull shown)
+    void set_shown(int x, int y, int z, ull shown)
     {
-        // 不加锁，调用这个函数一定要在外面加锁(world_mutex, shown_mutex)
+        // 不加锁，调用这个函数一定要在外面加锁(world_mutex)
         if (find_block(x, y, z)->shown == shown)
             return;
         find_block(x, y, z)->shown = shown;
@@ -655,16 +652,75 @@ struct World
         delete[] noise_rain;
         /*delete[] cave_noise;
         delete[] cave_noise_mix;*/
+        ull shown;
+        // 检查显示的方块，周边区块以及区块边缘的之后检查
+        for (int x = 1; x != 15; ++x)
+            for (int z = 1; z != 15; ++z)
+                for (int y = 0; y != 256; ++y)
+                {
+                    shown = 0ull;
+                    if (sector->blocks[(x * 16 + z) * 256 + y].id != 1)
+                        for (int i = 0, sdx, sdy, sdz; i < 6; ++i)
+                        {
+                            sdx = FACES[i][0], sdy = FACES[i][1], sdz = FACES[i][2];
+                            if (y + sdy < 0 || y + sdy >= 256)
+                                shown |= (1ull << i);
+                            // 同样的透明方块之间的面一个隐藏，一个显示
+                            else if (transparent_blocks.count(sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id) && sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id != sector->blocks[(x * 16 + z) * 256 + y].id)
+                                shown |= (1ull << i);
+                            else if (transparent_blocks.count(sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id) && sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id == sector->blocks[(x * 16 + z) * 256 + y].id && (sdx == 1 || sdy == 1 || sdz == 1))
+                                shown |= (1ull << i);
+                        }
+                    if (shown != 0ull)
+                    {
+                        sector->blocks[(x * 16 + z) * 256 + y].shown = shown;
+                        ull mask;
+                        unsigned short id = sector->blocks[(x * 16 + z) * 256 + y].id;
+                        sector->shown[{x, y, z}].second.resize(6);
+                        for (unsigned short i = 0; i != 64; ++i)
+                        {
+                            mask = 1ull << i;
+                            if (shown & mask)
+                            {
+                                vector<float> vertex_texture_data = get_tex_array_data(id, i, x + dx, y, z + dy);
+                                sector->shown[{x, y, z}].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                            }
+                        }
+                        sector->shown[{x, y, z}].first = shown;
+                    }
+                }
         lock_guard<recursive_mutex> lock_world(world_mutex);
         world[{old_dx, old_dy}] = sector;
-        ull exp;
-        // 检查显示的方块，周边区块边缘的也要检查
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
-        for (int x = -1; x != 17; ++x)
-            for (int z = -1; z != 17; ++z)
+        // 区块边缘的方块
+        for (int z = 1; z != 15; ++z)
+            for (int y = 0; y != 256; ++y)
+                set_shown(dx, y, z + dy, exposed(dx, y, z + dy));
+        for (int z = 1; z != 15; ++z)
+            for (int y = 0; y != 256; ++y)
+                set_shown(15 + dx, y, z + dy, exposed(15 + dx, y, z + dy));
+        for (int x = 0; x != 16; ++x)
+            for (int y = 0; y != 256; ++y)
+                set_shown(x + dx, y, dy, exposed(x + dx, y, dy));
+        for (int x = 0; x != 16; ++x)
+            for (int y = 0; y != 256; ++y)
+                set_shown(x + dx, y, 15 + dy, exposed(x + dx, y, 15 + dy));
+        // 周围区块边缘的方块
+        if (world.count({old_dx + 1, old_dy}))
+            for (int z = 0; z != 16; ++z)
                 for (int y = 0; y != 256; ++y)
-                    if ((exp = exposed(dx + x, y, dy + z)) != 0ull)
-                        set_shown(dx + x, y, dy + z, exp);
+                    set_shown(16 + dx, y, z + dy, exposed(16 + dx, y, z + dy));
+        if (world.count({old_dx, old_dy + 1}))
+            for (int x = 0; x != 16; ++x)
+                for (int y = 0; y != 256; ++y)
+                    set_shown(x + dx, y, 16 + dy, exposed(x + dx, y, 16 + dy));
+        if (world.count({old_dx - 1, old_dy}))
+            for (int z = 0; z != 16; ++z)
+                for (int y = 0; y != 256; ++y)
+                    set_shown(-1 + dx, y, z + dy, exposed(-1 + dx, y, z + dy));
+        if (world.count({old_dx, old_dy - 1}))
+            for (int x = 0; x != 16; ++x)
+                for (int y = 0; y != 256; ++y)
+                    set_shown(x + dx, y, -1 + dy, exposed(x + dx, y, -1 + dy));
         lock_guard<recursive_mutex> lock_operations(operations_mutex);
         operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy));
         if (world.count({old_dx + 1, old_dy}))
@@ -696,7 +752,6 @@ struct World
     void decorate_sector(int sx, int sy)
     {
         lock_guard<recursive_mutex> lock_world(world_mutex);
-        lock_guard<recursive_mutex> lock_shown(shown_mutex);
         Sector* sector = world[{sx, sy}];
         Block* block;
         unsigned int tmp;
@@ -840,8 +895,8 @@ struct World
                 if (!generated_holes.count(now))
                 {
                     generated_holes.insert(now);
-                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
-                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 32, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 16, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 48, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
                 }
             }
             // 生成区块

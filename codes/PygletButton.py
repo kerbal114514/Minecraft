@@ -2,7 +2,7 @@ import pyglet
 from pyglet.window import mouse
 
 class Button:
-    def __init__(self, x, y, width, height, text, bg_color, intersect_color, fg_color, callback=None):
+    def __init__(self, x, y, width, height, text, bg_color, intersect_color, fg_color, font, callback=None):
         self.x = x
         self.y = y
         self.width = width
@@ -13,6 +13,7 @@ class Button:
         self.n = self.width // 2
         self.m = self.height // 2
         self.bg_color = bg_color
+        self.fg_color = fg_color
         self.intersect_color = intersect_color
         self.bg = pyglet.graphics.vertex_list(4,
             ('v2i', (x + self.n, y + self.m, x + self.n, y - self.m, x - self.n, y - self.m, x - self.n, y + self.m)),
@@ -25,7 +26,7 @@ class Button:
 
         # 文字
         self.label = pyglet.text.Label(
-            text, font_name='微软雅黑', font_size=12,
+            text, font_name=font[0], font_size=font[1],
             x=x, y=y,
             anchor_x='center', anchor_y='center',
             color=fg_color
@@ -38,11 +39,18 @@ class Button:
             self.bg.draw(pyglet.gl.GL_QUADS)
         self.label.draw()
 
-    def replace(self, x, y):
+    def replace(self, x, y, width, height, font):
         self.x = x
         self.y = y
         self.label.x = x
         self.label.y = y
+        self.label.font_name = font[0]
+        self.width = width
+        self.height = height
+        self.n = self.width // 2
+        self.m = self.height // 2
+        self.bg.delete()
+        self.intersect_bg.delete()
         self.bg = pyglet.graphics.vertex_list(4,
             ('v2i', (x + self.n, y + self.m, x + self.n, y - self.m, x - self.n, y - self.m, x - self.n, y + self.m)),
             ('c4B', self.bg_color * 4)
@@ -50,6 +58,15 @@ class Button:
         self.intersect_bg = pyglet.graphics.vertex_list(4,
             ('v2i', (x + self.n, y + self.m, x + self.n, y - self.m, x - self.n, y - self.m, x - self.n, y + self.m)),
             ('c4B', self.intersect_color * 4)
+        )
+        # 文字
+        text = self.label.text
+        self.label.delete()
+        self.label = pyglet.text.Label(
+            text, font_name=font[0], font_size=font[1],
+            x=x, y=y,
+            anchor_x='center', anchor_y='center',
+            color=self.fg_color
         )
 
     def is_hit(self, mx, my):

@@ -23,7 +23,7 @@ block_id = [
     "block.minecraft.nature.stone",
     "block.minecraft.nature.bedrock",
     "block.minecraft.wood.oak_log",
-    "block.minecraft.wood.oak_leaves",
+    "block.minecraft.leaves.oak_leaves",
 ]
 
 gamerule = {
@@ -40,6 +40,11 @@ gamerule = {
     'terminal_speed': 78.4,
 }
 
+settings = {
+    'gui_size': 2,
+    'simulate_distance': 8,
+}
+
 def cube_vertices(x, y, z, n):
     """ Return the vertices of the cube at position x, y, z with size 2*n.
 
@@ -53,7 +58,7 @@ def cube_vertices(x, y, z, n):
         [x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n],  # back
     ]
 
-simulate_distance = 8
+simulate_distance = settings['simulate_distance']
 simulate_sectors = set()
 for x in range(-simulate_distance, simulate_distance + 1):
     for y in range(-simulate_distance, simulate_distance + 1):
@@ -76,7 +81,7 @@ textures = {
     'block.minecraft.nature.bedrock': (3, 3, 3, 3, 3, 3),
     'block.minecraft.nature.stone': (4, 4, 4, 4, 4, 4),
     'block.minecraft.wood.oak_log': (5, 5, 6, 6, 6, 6),
-    'block.minecraft.wood.oak_leaves': (7, 7, 7, 7, 7, 7),
+    'block.minecraft.leaves.oak_leaves': (7, 7, 7, 7, 7, 7),
 }
 
 def create_texture_array(image_list, path='./Textures'):
@@ -120,6 +125,15 @@ replace_mipmap(tex_array_id, 7, 1, "oak_leaves_mipmap_1.png")
 replace_mipmap(tex_array_id, 7, 2, "oak_leaves_mipmap_2.png")
 replace_mipmap(tex_array_id, 7, 3, "oak_leaves_mipmap_3.png")
 replace_mipmap(tex_array_id, 7, 4, "oak_leaves_mipmap_4.png")
+
+gui_texture_id = GLuint(0)
+glGenTextures(1, ctypes.byref(gui_texture_id))
+img = pyglet.image.load('./Textures/gui.png')
+glBindTexture(GL_TEXTURE_2D, gui_texture_id)
+glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.get_data('RGBA', img.width * 4))
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+glBindTexture(GL_TEXTURE_2D, 0)
 
 def get_tex_array_data(block_name, face_index):
     img_idx = textures[block_name][face_index]
@@ -239,7 +253,7 @@ block_update_func = {
     'block.minecraft.nature.bedrock': empty_update_func,
     'block.minecraft.nature.stone': empty_update_func,
     'block.minecraft.wood.oak_log': empty_update_func,
-    'block.minecraft.wood.oak_leaves': empty_update_func,
+    'block.minecraft.leaves.oak_leaves': empty_update_func,
 }
 
 def grass_block_random_tick_func(self, x, y, z):
@@ -266,18 +280,52 @@ block_random_tick_func = {
     'block.minecraft.nature.bedrock': empty_update_func,
     'block.minecraft.nature.stone': empty_update_func,
     'block.minecraft.wood.oak_log': empty_update_func,
-    'block.minecraft.wood.oak_leaves': empty_update_func,
+    'block.minecraft.leaves.oak_leaves': empty_update_func,
 }
 
+def empty_item_use_func(self):
+    pass
+
+def block_item_use_func(self, name):
+    x, y, z = self.position
+    y += 1.2
+    if self.shift and not self.flying:
+        y -= 0.5
+    block, previous = self.world.hit_test(x, y, z, *self.get_sight_vector(), 5)
+    if previous:
+        self.world.add_block(*previous, name)
+
+item_use_func = {
+    'item.minecraft.dev.null': empty_item_use_func,
+    'item.minecraft.block_item.nature.grass_block': lambda self : block_item_use_func(self, 'block.minecraft.nature.grass_block'),
+    'item.minecraft.block_item.nature.dirt': lambda self : block_item_use_func(self, 'block.minecraft.nature.dirt'),
+    'item.minecraft.block_item.nature.bedrock': lambda self : block_item_use_func(self, 'block.minecraft.nature.bedrock'),
+    'item.minecraft.block_item.nature.stone': lambda self : block_item_use_func(self, 'block.minecraft.nature.stone'),
+    'item.minecraft.block_item.wood.oak_log': lambda self : block_item_use_func(self, 'block.minecraft.wood.oak_log'),
+    'item.minecraft.block_item.leaves.oak_leaves': lambda self : block_item_use_func(self, 'block.minecraft.leaves.oak_leaves'),
+}
+
+items_texture_id = {}
+for key_ in item_use_func.keys():
+    items_texture_id[key_] = GLuint(0)
+    glGenTextures(1, ctypes.byref(items_texture_id[key_]))
+    img = pyglet.image.load(f'./Textures/{key_}.png')
+    glBindTexture(GL_TEXTURE_2D, items_texture_id[key_])
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, img.get_data('RGBA', img.width * 4))
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+    glGenerateMipmap(GL_TEXTURE_2D)
+    glBindTexture(GL_TEXTURE_2D, 0)
+
 block_friction = {    # 摩擦系数
-    'block.minecraft.dev.air': 3,
-    'block.minecraft.dev.sector_not_loaded': 3,
+    'block.minecraft.dev.air': 2,
+    'block.minecraft.dev.sector_not_loaded': 2,
     'block.minecraft.nature.grass_block': 15,
     'block.minecraft.nature.dirt': 15,
     'block.minecraft.nature.bedrock': 15,
     'block.minecraft.nature.stone': 15,
     'block.minecraft.wood.oak_log': 15,
-    'block.minecraft.wood.oak_leaves': 15,
+    'block.minecraft.leaves.oak_leaves': 15,
 }
 
 with open("Shaders/block_vertex_shader.glsl") as f:
@@ -293,6 +341,8 @@ with open("Shaders/skybox_fragment_shader.glsl") as f:
 class Window(pyglet.window.Window):
     def __init__(self, *args, **kw):
         super().__init__(*args, **kw)
+        # 设置窗口图标
+        self.set_icon(pyglet.image.load('./Textures/item.minecraft.block_item.nature.grass_block.png'))
         # 是否锁定鼠标
         self.exclusive = False
         # Strafing is moving lateral to the direction you are facing,
@@ -316,6 +366,7 @@ class Window(pyglet.window.Window):
         # 准星
         self.reticle = None
         self.escape_menu_shade = None
+        self.inventory_gui = None
         self.render_distance = simulate_distance
         self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
         # 按键
@@ -334,23 +385,24 @@ class Window(pyglet.window.Window):
         self.world.add_block_entity_box('block.minecraft.nature.stone', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_block_entity_box('block.minecraft.nature.stone', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_block_entity_box('block.minecraft.wood.oak_log', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
-        self.world.add_block_entity_box('block.minecraft.wood.oak_leaves', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
+        self.world.add_block_entity_box('block.minecraft.leaves.oak_leaves', -0.5, 0.5, -0.5, 0.5, -0.5, 0.5)
         self.world.add_entity_entity_box('entity.minecraft.player', -0.3, 0.3, -0.5, 1.3, -0.3, 0.3)
         # 决定渲染哪些东西
         self.level = 'escape_menu'
         # 所有按钮
         self.mouse_position = (-1, -1)
+        gs = settings['gui_size']
         self.buttons = {
-            'escape_menu.resume_game': Button(0, 0, 480, 40, 'Resume game', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), self.resume_game),
-            'escape_menu.save_and_return': Button(0, 0, 480, 40, 'Save and return to the main menu', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), self.save_and_return),
+            'escape_menu.resume_game': Button(0, 0, 240 * gs , 20 * gs, 'Resume game', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), ('微软雅黑', 6 * gs), self.resume_game),
+            'escape_menu.save_and_return': Button(0, 0, 240 * gs, 20 * gs, 'Save and return to the main menu', (111, 111, 111, 255), (117, 127, 186, 255), (255, 255, 255, 255), ('微软雅黑', 6 * gs), self.save_and_return),
         }
         # 按钮相对于窗口中心的偏移量，用于on_resize
         self.buttons_offset = {
-            'escape_menu.resume_game': (0, 64),
-            'escape_menu.save_and_return': (0, -64),
+            'escape_menu.resume_game': (0, 15),
+            'escape_menu.save_and_return': (0, -15),
         }
         # 注册透明方块
-        self.world.add_transparent_block('block.minecraft.wood.oak_leaves')
+        self.world.add_transparent_block('block.minecraft.leaves.oak_leaves')
         # 着色器
         self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
         self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code)
@@ -360,7 +412,7 @@ class Window(pyglet.window.Window):
         self.vbo_size = {}
         self.vbo_reserve_size = {}
         # 函数字典
-        self.functions = {'update_shown': self.update_shown, 'hide_block': self.hide_block, 'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
+        self.functions = {'block_update': self.block_update, 'update_vbo_data': self.update_vbo_data}
         # 生成天空盒顶点数据
         vertex = []
         x, y, z = 0, 0, 0
@@ -371,6 +423,17 @@ class Window(pyglet.window.Window):
         vertex.extend((x - 16, y - 16, z - 16, x - 16, y - 16, z + 16, x + 16, y - 16, z + 16, x + 16, y - 16, z - 16))
         vertex.extend((x - 16, y + 16, z - 16, x - 16, y + 16, z + 16, x + 16, y + 16, z + 16, x + 16, y + 16, z - 16))
         self.sky_box = pyglet.graphics.vertex_list(len(vertex) // 3, ('v3f', vertex))
+        self.inventory = []    # 二维数组，[0][x]是物品栏，[1-3][x]是背包，[4][x]备用，x: 1-9
+        for i in range(5):
+            self.inventory.append([None, 'item.minecraft.dev.null', 'item.minecraft.dev.null', 'item.minecraft.dev.null', 'item.minecraft.dev.null',\
+                'item.minecraft.dev.null', 'item.minecraft.dev.null', 'item.minecraft.dev.null', 'item.minecraft.dev.null', 'item.minecraft.dev.null'])
+        self.inventory[0][1] = 'item.minecraft.block_item.nature.grass_block'
+        self.inventory[0][2] = 'item.minecraft.block_item.nature.dirt'
+        self.inventory[0][3] = 'item.minecraft.block_item.nature.stone'
+        self.inventory[0][4] = 'item.minecraft.block_item.wood.oak_log'
+        self.inventory[0][5] = 'item.minecraft.block_item.leaves.oak_leaves'
+        self.activated_inventory_id = 1
+        self.world.set_position(*self.position)
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
@@ -422,34 +485,6 @@ class Window(pyglet.window.Window):
         self.world.unlock_world_mutex()
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         self.vbo_size[(x, y)] = data[1] // 7
-
-    def update_shown(self, x, y, z):
-        vertex_data = cube_vertices(x, y, z, 0.5)
-        if (x, y, z) not in self.shown:
-            self.shown[(x, y, z)] = [0, {}]
-        shown = self.world.get_shown(x, y, z)
-        block_type = block_id[self.world.get_block(x, y, z)]
-        for i in range(64):
-            mask = 1 << i
-            if ((shown & mask) != (self.shown[(x, y, z)][0] & mask)):
-                if (self.shown[(x, y, z)][0] & mask):
-                    self.shown[(x, y, z)][1][i].delete()
-                    del self.shown[(x, y, z)][1][i]
-                else:
-                    tex_coords = get_tex_array_data(block_type, i)
-                    self.shown[(x, y, z)][1][i] = self.batch.add(
-                        4, GL_QUADS, None,
-                        ('v3f/static', vertex_data[i]),
-                        ('t3f/static', tex_coords)
-                    )
-        self.shown[(x, y, z)][0] = shown
-
-    def hide_block(self, x, y, z):
-        if (x, y, z) not in self.shown:
-            return
-        for i in self.shown[(x, y, z)][1]:
-            self.shown[(x, y, z)][1][i].delete()
-        del self.shown[(x, y, z)]
 
     def block_update(self, x, y, z):
         for dx, dy, dz in FACES:
@@ -695,19 +730,16 @@ class Window(pyglet.window.Window):
 
         """
         if self.exclusive:
-            dx, dy, dz = self.get_sight_vector()
-            x, y, z = self.position
-            y += 1.2
-            if self.shift and not self.flying:
-                y -= 0.5
-            block, previous = self.world.hit_test(x, y, z, dx, dy, dz, 5)
-            #print(block, previous)
             if (button == mouse.RIGHT):
-                if previous:
-                    nx, ny, nz = previous
-                    self.world.add_block(nx, ny, nz, "block.minecraft.wood.oak_leaves")
-            elif button == pyglet.window.mouse.LEFT and block:
-                self.world.remove_block(*block)
+                item_use_func[self.inventory[0][self.activated_inventory_id]](self)
+            elif button == pyglet.window.mouse.LEFT:
+                x, y, z = self.position
+                y += 1.2
+                if self.shift and not self.flying:
+                    y -= 0.5
+                block, previous = self.world.hit_test(x, y, z, *self.get_sight_vector(), 5)
+                if block:
+                    self.world.remove_block(*block)
         for key in self.buttons:
             origin_key = key
             key = key.split('.')
@@ -736,6 +768,12 @@ class Window(pyglet.window.Window):
             x, y = x + dx * m, y + dy * m
             y = max(-90, min(90, y))
             self.rotation = (x, y)
+
+    def on_mouse_scroll(self, *args):
+        '''Pyglet1.5.27 has a bug, so I use *args'''
+        scroll_x = -int(args[3])
+        self.activated_inventory_id += scroll_x
+        self.activated_inventory_id = (self.activated_inventory_id - 1) % 9 + 1
 
     def on_key_press(self, symbol, modifiers):
         """ Called when the player presses a key. See pyglet docs for key
@@ -778,6 +816,24 @@ class Window(pyglet.window.Window):
                 self.level = 'normal'
         elif symbol == key.G:
             print(self.position, self.delta)
+        elif symbol == key._1:
+            self.activated_inventory_id = 1
+        elif symbol == key._2:
+            self.activated_inventory_id = 2
+        elif symbol == key._3:
+            self.activated_inventory_id = 3
+        elif symbol == key._4:
+            self.activated_inventory_id = 4
+        elif symbol == key._5:
+            self.activated_inventory_id = 5
+        elif symbol == key._6:
+            self.activated_inventory_id = 6
+        elif symbol == key._7:
+            self.activated_inventory_id = 7
+        elif symbol == key._8:
+            self.activated_inventory_id = 8
+        elif symbol == key._9:
+            self.activated_inventory_id = 9
 
     def on_key_release(self, symbol, modifiers):
         """ Called when the player releases a key. See pyglet docs for key
@@ -835,8 +891,16 @@ class Window(pyglet.window.Window):
             ('v2i', (0, 0, width, 0, width, height, 0, height)),
             ('c4B', (0, 0, 0, 128) * 4)
         )
-        for key in self.buttons:
-            self.buttons[key].replace(width // 2 + self.buttons_offset[key][0], height // 2 + self.buttons_offset[key][1])
+        if self.inventory_gui:
+            self.inventory_gui.delete()
+        gs = settings['gui_size']
+        self.inventory_gui = pyglet.graphics.vertex_list(4,
+            ('v2i', (width // 2 - 90 * gs, 24, width // 2 + 90 * gs, 24, width // 2 + 90 * gs, 24 + 20 * gs, width // 2 - 90 * gs, 24 + 20 * gs)),
+            ('t2f', (1 / 256, 1 - 21 / 64, 181 / 256, 1 - 21 / 64, 181 / 256, 1 - 1 / 64, 1 / 256, 1 - 1 / 64)),
+            ('c4B', (255, 255, 255, 255) * 4)
+        )
+        for key in self.buttons.keys():
+            self.buttons[key].replace(width // 2 + self.buttons_offset[key][0] * gs, height // 2 + self.buttons_offset[key][1] * gs, 240 * gs, 20 * gs, ('微软雅黑', 6 * gs))
 
     def on_deactivate(self):
         if self.level == 'normal':
@@ -916,11 +980,39 @@ class Window(pyglet.window.Window):
             glBindVertexArray(self.vao_id[key])
             glDrawArrays(GL_QUADS, 0, self.vbo_size[key])
         glBindVertexArray(0)
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0)
         self.block_shader.unbind()
         glDepthFunc(GL_LEQUAL)
         self.draw_focused_block()
         glDepthFunc(GL_LESS)
         self.set_2d()
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, gui_texture_id)
+        self.inventory_gui.draw(GL_QUADS)
+        gs = settings['gui_size']
+        pyglet.graphics.draw(4, GL_QUADS,
+            ('v2i', (
+                self.width // 2 - 90 * gs - gs + self.activated_inventory_id * 20 * gs - 20 * gs, 24 - gs,
+                self.width // 2 - 70 * gs + gs + self.activated_inventory_id * 20 * gs - 20 * gs, 24 - gs,
+                self.width // 2 - 70 * gs + gs + self.activated_inventory_id * 20 * gs - 20 * gs, 24 + gs * 20 + gs,
+                self.width // 2 - 90 * gs - gs + self.activated_inventory_id * 20 * gs - 20 * gs, 24 + gs * 20 + gs,
+            )),
+            ('t2f', (1 / 256, 1 - 44 / 64, 22 / 256, 1 - 44 / 64, 22 / 256, 1 - 23 / 64, 1 / 256, 1 - 23 / 64)),
+            ('c4B', (255, 255, 255, 255) * 4)
+        )
+        for i in range(1, 10):
+            glBindTexture(GL_TEXTURE_2D, items_texture_id[self.inventory[0][i]])
+            pyglet.graphics.draw(4, GL_QUADS,
+                ('v2i', (
+                    self.width // 2 - 90 * gs + i * 20 * gs - 20 * gs + gs * 2, 24 + gs * 2,
+                    self.width // 2 - 70 * gs + i * 20 * gs - 20 * gs - gs * 2, 24 + gs * 2,
+                    self.width // 2 - 70 * gs + i * 20 * gs - 20 * gs - gs * 2, 24 + gs * 20 - gs * 2,
+                    self.width // 2 - 90 * gs + i * 20 * gs - 20 * gs + gs * 2, 24 + gs * 20 - gs * 2,
+                )),
+                ('t2f', (0, 0, 1, 0, 1, 1, 0, 1)),
+                ('c4B', (255, 255, 255, 255) * 4)
+            )
+        glDisable(GL_TEXTURE_2D)
         self.reticle.draw(GL_LINES)
         if self.level == 'escape_menu':
             self.escape_menu_shade.draw(GL_QUADS)
