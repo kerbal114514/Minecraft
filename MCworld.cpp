@@ -16,16 +16,11 @@
 #include <tuple>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <FastNoise/FastNoise.h>
 using namespace std;
 #define get_sector(x) ((x >= 0) ? (x / 16) : ((x - 15) / 16))
 using ull = unsigned long long;
-
-#ifdef _MSC_VER
-#define NOINLINE [[msvc::noinline]]
-#else
-#define NOINLINE [[gnu::noinline]]
-#endif
 
 const map<string, string> emptyNBT;
 
@@ -73,13 +68,6 @@ struct Block
 {
     unsigned short id;
     ull shown;
-    bool has_NBT;
-    map<string, string>* NBT;
-    ~Block()
-    {
-        if (has_NBT)
-            delete NBT;
-    }
 };
 
 const string block_id[] =
@@ -134,8 +122,8 @@ vector<float> get_tex_array_data(unsigned short id, int face_index, int x, int y
     return ret;
 }
 
-Block air{1, 0, false, nullptr};
-Block sector_not_loaded{0, 0, false, nullptr};
+Block air{1, 0ull};
+Block sector_not_loaded{0, 0ull};
 
 struct Sector_block_pos_hash
 {
@@ -186,6 +174,7 @@ struct GL_QUADS_vbo_data
 struct Sector
 {
     Block* blocks;
+    unordered_map<tuple<int, int, int>, map<string, string>, Sector_block_pos_hash> NBTs;
     int* data;
     unsigned short* biome;
     GL_QUADS_vbo_data vertex_data_struct;
@@ -329,6 +318,7 @@ struct World
     unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes;
     unordered_map<Sector_pos, bitset<16 * 256 * 16>, Sector_pos_hash> holes;    // true即洞穴
     FastNoise::SmartNode<> noise;
+    FastNoise::SmartNode<> terrain_noise_generater;
     int seed;
     // 添加互斥锁，使用 recursive_mutex 允许同一个线程多次加锁
     mutable recursive_mutex world_mutex;    // world
@@ -338,7 +328,13 @@ struct World
     World(int seed_arg, int simulate_distance_arg)
     {
         ++simulate_distance_arg;
-        noise = FastNoise::New<FastNoise::Simplex>();
+        noise = FastNoise::NewFromEncodedNodeTree("DQkR@BSEMJBw@AEhDBAMAAMhCDA==");
+        ifstream nodetree_file;
+        nodetree_file.open("NodeTree.txt", ios::in);
+        string nodetree_string;
+        nodetree_file >> nodetree_string;
+        nodetree_file.close();
+        terrain_noise_generater = FastNoise::NewFromEncodedNodeTree(nodetree_string.c_str());
         seed = seed_arg;
         simulate_distance = simulate_distance_arg;
         for (int x = -simulate_distance; x <= simulate_distance; ++x)
@@ -485,29 +481,26 @@ struct World
         Block* block = find_block(x, y, z);
         if (block->id == 0 || block->id != 1)
             return;
-        block->id = id;
-        block->shown = 0;
-        block->has_NBT = has_NBT;
-        if (has_NBT)
-            block->NBT = new map<string, string>(NBT);
-        else
-            block->NBT = nullptr;
-        Pos position_local;
-        {
-            lock_guard<recursive_mutex> lock_position(position_mutex);
-            position_local = position;
-        }
         if (auto_process)
         {
+            Pos position_local;
+            {
+                lock_guard<recursive_mutex> lock_position(position_mutex);
+                position_local = position;
+            }
             for (const entity_box &a : block_entity_boxes[sid])
                 for (const entity_box &b : entity_entity_boxes["entity.minecraft.player"])
                     if (AABB(a, b, {(double)x, (double)y, (double)z}, position_local))
-                    {
-                        if (block->has_NBT)
-                            delete block->NBT;
-                        (*block) = air;
                         return;
-                    }
+        }
+        block->id = id;
+        block->shown = 0;
+        if (has_NBT)
+        {
+            world[{get_sector(x), get_sector(z)}]->NBTs[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}] = NBT;
+        }
+        if (auto_process)
+        {
             set_shown(x, y, z, exposed(x, y, z));
             check_neighbors(x, y, z);
             lock_guard<recursive_mutex> lock_operations(operations_mutex);
@@ -531,8 +524,10 @@ struct World
             return;
         if (auto_process)
             set_shown(x, y, z, 0ull);
-        if (block->has_NBT)
-            delete block->NBT;
+        unordered_map<tuple<int, int, int>, map<string, string>, Sector_block_pos_hash>::iterator it;
+        it = world[{get_sector(x), get_sector(z)}]->NBTs.find({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16});
+        if (it != world.at({get_sector(x), get_sector(z)})->NBTs.end())
+            world.at({get_sector(x), get_sector(z)})->NBTs.erase(it);
         (*block) = air;
         if (auto_process)
         {
@@ -589,7 +584,7 @@ struct World
         int height1, height2;
         noise->GenUniformGrid2D(noise_altitude, dx * 0.05f, dy * 0.05f, 16, 16, 0.05f, 0.05f, seed);
         noise->GenUniformGrid2D(noise_fluctuate, dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed + 1);
-        noise->GenUniformGrid2D(noise_terrain, dx, dy, 16, 16, 1, 1, seed + 1);
+        terrain_noise_generater->GenUniformGrid2D(noise_terrain, dx * 2, dy * 2, 16, 16, 2, 2, seed + 1);
         noise->GenUniformGrid2D(noise_tree_density, dx * 0.5f, dy * 0.5f, 16, 16, 0.5f, 0.5f, seed + 2);
         noise->GenUniformGrid2D(noise_rain, dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 3);
         //noise->GenUniformGrid3D(cave_noise, dx / 16 * 5 * 4, seed / 1048576, dy / 16 * 5 * 4, 5, 33, 5, 5.0f, 20.0f, 5.0f, seed);    // 洞穴的3D噪声，后期用线性差值处理
@@ -783,12 +778,10 @@ struct World
                     for (int dy = 1; dy < 6; ++dy)
                     {
                         block = find_block(sx * 16 + x, y + dy, sy * 16 + z);
-                        if (block->has_NBT)
-                            delete block->NBT;
+                        if (block->id != 1)
+                            continue;
                         block->id = 6;
                         block->shown = 0;
-                        block->has_NBT = false;
-                        block->NBT = nullptr;
                     }
                     for (int dx = -2; dx <= 2; ++dx)
                         for (int dz = -2; dz <= 2; ++dz)
@@ -799,8 +792,6 @@ struct World
                                     continue;
                                 block->id = 7;
                                 block->shown = 0;
-                                block->has_NBT = false;
-                                block->NBT = nullptr;
                             }
                     for (int dx = -1, dy = 5; dx <= 1; ++dx)
                         for (int dz = -1; dz <= 1; ++dz)
@@ -810,8 +801,6 @@ struct World
                                 continue;
                             block->id = 7;
                             block->shown = 0;
-                            block->has_NBT = false;
-                            block->NBT = nullptr;
                         }
                     for (int dx = -1, dy = 6; dx <= 1; ++dx)
                         for (int dz = -1; dz <= 1; ++dz)
@@ -823,8 +812,6 @@ struct World
                                 continue;
                             block->id = 7;
                             block->shown = 0;
-                            block->has_NBT = false;
-                            block->NBT = nullptr;
                         }
                     for (int dx = -5; dx <= 5; ++dx)
                         for (int dz = -5; dz <= 5; ++dz)

@@ -352,7 +352,7 @@ class Window(pyglet.window.Window):
         # right, and 0 otherwise.
         # 按键
         self.strafe = [0, 0]
-        self.position = (0, 200, 0)
+        self.position = (0, 258, 0)
         self.flying = False
         self.delta = [0, 0, 0]
         # First element is rotation of the player in the x-z plane (ground
