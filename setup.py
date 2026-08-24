@@ -2,9 +2,9 @@ from setuptools import setup
 import sys
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 
-# 定义路径（请根据你的实际存放位置调整）
+# 定义路径
 FASTNOISE2_INCLUDE = "FastNoise2/include"
-FASTNOISE2_LIB_DIR = "FastNoise2/build/lib"
+FASTNOISE2_LIB_DIR = "FastNoise2/build/Release/lib" if sys.platform == 'win32' else "FastNoise2/build/lib"
 FASTSIMD_INCLUDE = "FastNoise2/build/_deps/fastsimd-src/include"
 
 ext_modules = [
@@ -18,8 +18,7 @@ ext_modules = [
         library_dirs=[FASTNOISE2_LIB_DIR],
         # 3. 指定要链接的库名 (不需要加 lib 前缀和 .a/.lib 后缀)
         libraries=["FastNoise"],
-        # 4. 静态链接宏定义 (MCworld.cpp 中不需要定义)
-        define_macros=[('FASTNOISE_STATIC_LIB', None)],
+        extra_compile_args=(["/utf-8"] if sys.platform == 'win32' else ['-Wall', '-Wextra'])
     ),
 ]
 

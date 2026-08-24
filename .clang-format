@@ -1,0 +1,19 @@
+BasedOnStyle: Google
+IndentWidth: 4
+TabWidth: 4
+# public等与class对齐
+AccessModifierOffset: -4
+UseTab: Never
+ColumnLimit: 200
+
+# 强制所有控制语句使用大括号
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortLambdasOnASingleLine: None
+AllowShortCompoundRequirementOnASingleLine: false
+
+# 大括号风格
+BreakBeforeBraces: Attach

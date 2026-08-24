@@ -1,340 +1,885 @@
+#define FASTNOISE_STATIC_LIB
+#include <FastNoise/FastNoise.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <iostream>
+
 #include <algorithm>
-#include <thread>
-#include <mutex>
-#include <vector>
-#include <map>
-#include <string>
-#include <queue>
-#include <list>
+#include <array>
+#include <bit>
 #include <bitset>
-#include <format>
-#include <algorithm>
-#include <set>
-#include <tuple>
 #include <chrono>
 #include <cmath>
-#include <fstream>
-#include <FastNoise/FastNoise.h>
-using namespace std;
-#define get_sector(x) ((x >= 0) ? (x / 16) : ((x - 15) / 16))
-using ull = unsigned long long;
+#include <cstdint>
+#include <format>
+#include <list>
+#include <map>
+#include <mutex>
+#include <queue>
+#include <set>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#define mod16(x) (((x) % 16 + 16) % 16)
 
-const map<string, string> emptyNBT;
-
-int FACES[6][3] =
-{
-    0, 1, 0,
-    0, -1, 0,
-    -1, 0, 0,
-    1, 0, 0,
-    0, 0, 1,
-    0, 0, -1,
-};
-int SECTOR_FACES[8][2] =
-{
-    1, 0,
-    -1, 0,
-    0, 1,
-    0, -1,
-    1, 1,
-    1, -1,
-    -1, 1,
-    -1, -1,
-};
-// 法线：1 : (1, 0, 0)
-//       2 : (-1, 0, 0)
-//       3 : (0, 1, 0)
-//       4 : (0, -1, 0)
-//       5 : (0, 0, 1)
-//       6 : (0, 0, -1)
-//       0 : 不渲染
-vector<vector<float>> cube_vertices(float x, float y, float z, float n)
-{
-    vector<vector<float>> ret(6);
-    // 最后一个是法线
-    ret[0] = vector<float>({x-n,y+n,z-n, x-n,y+n,z+n, x+n,y+n,z+n, x+n,y+n,z-n, 3.0f});    // top
-    ret[1] = vector<float>({x-n,y-n,z-n, x+n,y-n,z-n, x+n,y-n,z+n, x-n,y-n,z+n, 4.0f});    // bottom
-    ret[2] = vector<float>({x-n,y-n,z-n, x-n,y-n,z+n, x-n,y+n,z+n, x-n,y+n,z-n, 2.0f});    // left
-    ret[3] = vector<float>({x+n,y-n,z+n, x+n,y-n,z-n, x+n,y+n,z-n, x+n,y+n,z+n, 1.0f});    // right
-    ret[4] = vector<float>({x-n,y-n,z+n, x+n,y-n,z+n, x+n,y+n,z+n, x-n,y+n,z+n, 5.0f});    // front
-    ret[5] = vector<float>({x+n,y-n,z-n, x-n,y-n,z-n, x-n,y+n,z-n, x+n,y+n,z-n, 6.0f});    // back
-    return ret;
-}
-
-struct Block
-{
-    unsigned short id;
-    ull shown;
-};
-
-const string block_id[] =
-{
-    "block.minecraft.dev.sector_not_loaded",//0
-    "block.minecraft.dev.air",//1
-    "block.minecraft.nature.grass_block",//2
-    "block.minecraft.nature.dirt",//3
-    "block.minecraft.nature.stone",//4
-    "block.minecraft.nature.bedrock",//5
-    "block.minecraft.wood.oak_log",//6
-    "block.minecraft.leaves.oak_leaves",//7
-};
-const unordered_map<string, unsigned short> id_block =
-{
-    {"block.minecraft.dev.sector_not_loaded", 0},
-    {"block.minecraft.dev.air", 1},
-    {"block.minecraft.nature.grass_block", 2},
-    {"block.minecraft.nature.dirt", 3},
-    {"block.minecraft.nature.stone", 4},
-    {"block.minecraft.nature.bedrock", 5},
-    {"block.minecraft.wood.oak_log", 6},
-    {"block.minecraft.leaves.oak_leaves", 7},
-};
-const unordered_map<unsigned short, const vector<unsigned short>> textures =
-{
-    {2, {0, 2, 1, 1, 1, 1}},
-    {3, {2, 2, 2, 2, 2, 2}},
-    {4, {4, 4, 4, 4, 4, 4}},
-    {5, {3, 3, 3, 3, 3, 3}},
-    {6, {5, 5, 6, 6, 6, 6}},
-    {7, {7, 7, 7, 7, 7, 7}},
-};
-const float uvs[] = {0.0f, 0.0f, -1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 1.0f, -1.0f};    // -1.0用于和顶点三个数据对齐
-unordered_set<int> transparent_blocks = {1};
-
-vector<float> get_tex_array_data(unsigned short id, int face_index, int x, int y, int z)
-{
-    int img_idx = textures.at(id)[face_index];
-    vector<float> vertices = cube_vertices(x, y, z, 0.5)[face_index];
-    vector<float> ret(7 * 4);
-    for (unsigned int i = 0, j = 0; i != 4 * 7; i += 7, j += 3)
-    {
-        ret[i] = vertices[j];
-        ret[i + 1] = vertices[j + 1];
-        ret[i + 2] = vertices[j + 2];
-        ret[i + 3] = uvs[j];
-        ret[i + 4] = uvs[j + 1];
-        ret[i + 5] = img_idx;
-        ret[i + 6] = vertices[12];
-    }
-    return ret;
-}
-
-Block air{1, 0ull};
-Block sector_not_loaded{0, 0ull};
-
-struct Sector_block_pos_hash
-{
-    size_t operator()(const tuple<int, int, int>& p) const
-    {
-        return ((get<0>(p) % 16 + 16) % 16 * 16 + (get<2>(p) % 16 + 16) % 16) * 256 + get<1>(p);
-    }
-};
-
-struct GL_QUADS_vbo_data
-{
-    unsigned int size;
-    vector<unsigned int> unoccupied_ids;
-    vector<float> data;
-    GL_QUADS_vbo_data()
-    {
-        size = 0;
-        data.reserve(4 * 7 * 256);
-    }
-    int add(vector<float> vertices)    // vertices长度为4 * 7表示一个面（一个顶点长度为7，三个坐标，三个纹理，最后一个是法线和渲染状态，压缩为一个GLfloat）
-    // 法线：1 : (1, 0, 0)
-    //       2 : (-1, 0, 0)
-    //       3 : (0, 1, 0)
-    //       4 : (0, -1, 0)
-    //       5 : (0, 0, 1)
-    //       6 : (0, 0, -1)
-    //       0 : 不渲染
-    {
-        int id;
-        if (unoccupied_ids.empty())
-            id = size++;
-        else
-        {
-            id = unoccupied_ids[unoccupied_ids.size() - 1];
-            unoccupied_ids.pop_back();
-        }
-        data.resize(size * 4 * 7);
-        copy(vertices.begin(), vertices.end(), data.begin() + id * 4 * 7);
-        return id;
-    }
-    void erase(int id)
-    {
-        fill(data.begin() + id * 4 * 7, data.begin() + (id + 1) * 4 * 7, 0.0f);
-        unoccupied_ids.push_back(id);
-    }
-};
-
-struct Sector
-{
-    Block* blocks;
-    unordered_map<tuple<int, int, int>, map<string, string>, Sector_block_pos_hash> NBTs;
-    int* data;
-    unsigned short* biome;
-    GL_QUADS_vbo_data vertex_data_struct;
-    //                   方块坐标        之前的渲染状态  面的id
-    unordered_map<tuple<int, int, int>, pair<ull, vector<int>>, Sector_block_pos_hash> shown;
-    Sector()
-    {
-        blocks = new Block[16 * 256 * 16];    // (x, y, z)为blocks[x * 16 * 256 + y * 16 + z]
-        data = new int[16 * 16];    // (x, z)为data[x * 16 + z]
-        biome = new unsigned short[16 * 16];
-        fill(blocks, blocks + 16 * 256 * 16, air);
-    }
-    ~Sector()
-    {
-        delete[] blocks;
-        delete[] data;
-        delete[] biome;
-    }
-};
-
-struct Sector_pos
-{
+struct Sector_pos {
     int x, y;
-    Sector_pos operator+(const Sector_pos &b) const
-    {
+    inline Sector_pos operator+(const Sector_pos &b) const {
         return {x + b.x, y + b.y};
     }
-    bool operator==(const Sector_pos &b) const
-    {
+    inline bool operator==(const Sector_pos &b) const {
         return x == b.x && y == b.y;
     }
-};
-
-struct Sector_pos_hash
-{
-    size_t operator()(const Sector_pos& p) const
-    {
-        return (((long long)p.x) << 32) + p.y;
+    inline bool operator<(const Sector_pos &b) const {
+        return x != b.x ? x < b.x : y < b.y;
     }
 };
 
-struct Pos
-{
+struct Sector_pos_hash {
+    inline size_t operator()(const Sector_pos &p) const {
+        return (((size_t)p.x) << 32) + p.y;
+    }
+};
+
+struct Block_pos {
+    int x, y, z;
+    inline Block_pos operator+(const Block_pos &b) const {
+        return {x + b.x, y + b.y, z + b.z};
+    }
+    inline bool operator==(const Block_pos &b) const {
+        return x == b.x && y == b.y && z == b.z;
+    }
+};
+
+inline Sector_pos get_sector(int x, int y) {
+    return {(x >= 0) ? (x / 16) : ((x - 15) / 16), (y >= 0) ? (y / 16) : ((y - 15) / 16)};
+}
+inline int get_block_index(int x, int y, int z) {
+    return (mod16(x) * 16 + mod16(z)) * 256 + y;
+}
+
+inline Sector_pos get_sector(const Block_pos &p) {
+    return get_sector(p.x, p.z);
+}
+inline int get_block_index(const Block_pos &p) {
+    return get_block_index(p.x, p.y, p.z);
+}
+
+struct Block_pos_hash {
+    size_t operator()(const Block_pos &p) const {
+        return get_block_index(p);
+    }
+};
+
+struct Pos {
     double x, y, z;
-    Pos operator+(const Pos &b) const
-    {
+    Pos operator+(const Pos &b) const {
         return {x + b.x, y + b.y, z + b.z};
     }
 };
 
-struct entity_box
-{
-    double minx, maxx, miny, maxy, minz, maxz;
-    // 自动生成比较运算符
-    auto operator<=>(const entity_box&) const = default;
+const std::map<std::string, std::string> emptyNBT;
+
+constexpr Block_pos FACES[6] = {
+    {0, 1, 0}, {0, -1, 0}, {-1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, -1},
+};
+constexpr Sector_pos SECTOR_FACES[8] = {
+    {1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1},
 };
 
-inline bool AABB(const entity_box &a, const entity_box &b, Pos da, Pos db)
-{
+// 法线：1 : ( 1,  0,  0)
+//       2 : (-1,  0,  0)
+//       3 : ( 0,  1,  0)
+//       4 : ( 0, -1,  0)
+//       5 : ( 0,  0,  1)
+//       6 : ( 0,  0, -1)
+//       0 : 不渲染
+inline void cube_vertices(float x, float y, float z, float n, std::array<std::array<float, 13>, 6> &res) {
+    // 最后一个是法线
+    res[0] = {x - n, y + n, z - n, x - n, y + n, z + n, x + n, y + n, z + n, x + n, y + n, z - n, 3.0f};  // top
+    res[1] = {x - n, y - n, z - n, x + n, y - n, z - n, x + n, y - n, z + n, x - n, y - n, z + n, 4.0f};  // bottom
+    res[2] = {x - n, y - n, z - n, x - n, y - n, z + n, x - n, y + n, z + n, x - n, y + n, z - n, 2.0f};  // left
+    res[3] = {x + n, y - n, z + n, x + n, y - n, z - n, x + n, y + n, z - n, x + n, y + n, z + n, 1.0f};  // right
+    res[4] = {x - n, y - n, z + n, x + n, y - n, z + n, x + n, y + n, z + n, x - n, y + n, z + n, 5.0f};  // front
+    res[5] = {x + n, y - n, z - n, x - n, y - n, z - n, x - n, y + n, z - n, x + n, y + n, z - n, 6.0f};  // back
+}
+
+struct Block {
+    uint16_t id;
+    uint8_t light;  // 高4位储存天空光照，低4位储存方块光照
+};
+
+const std::string block_id[] = {
+    "block.minecraft.sector_not_loaded",  // 0
+    "block.minecraft.air",                // 1
+    "block.minecraft.grass_block",        // 2
+    "block.minecraft.dirt",               // 3
+    "block.minecraft.stone",              // 4
+    "block.minecraft.bedrock",            // 5
+    "block.minecraft.oak_log",            // 6
+    "block.minecraft.oak_leaves",         // 7
+    "block.minecraft.glowstone",          // 8
+};
+const std::unordered_map<std::string, uint16_t> id_block = {
+    {"block.minecraft.sector_not_loaded", 0}, {"block.minecraft.air", 1},     {"block.minecraft.grass_block", 2}, {"block.minecraft.dirt", 3},      {"block.minecraft.stone", 4},
+    {"block.minecraft.bedrock", 5},           {"block.minecraft.oak_log", 6}, {"block.minecraft.oak_leaves", 7},  {"block.minecraft.glowstone", 8},
+};
+
+constexpr uint8_t light_attenuation[] = {
+    1, 1, 15, 15, 15, 15, 15, 3, 15,
+};
+constexpr uint8_t block_light[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 15,
+};
+
+constexpr Block air{1, (0 << 4) + 0};
+Block sector_not_loaded{0, (0 << 4) + 0};
+
+class GL_QUADS_vbo_data {
+private:
+    uint64_t _size;
+    std::vector<uint64_t> unoccupied_ids;
+    std::vector<float> data;
+
+public:
+    GL_QUADS_vbo_data() {
+        _size = 0;
+        data.reserve(4 * 7 * 256);
+    }
+    uint64_t add(const std::array<float, 4 * 7> &vertices) {
+        // vertices长度为4 *
+        // 7表示一个面（一个顶点长度为7，三个坐标，三个纹理，最后一个是法线([1,
+        // 6])和渲染状态({0, 1})和亮度([0, 15])，压缩为一个GLfloat）
+        // 法线：1 : ( 1,  0,  0)
+        //       2 : (-1,  0,  0)
+        //       3 : ( 0,  1,  0)
+        //       4 : ( 0, -1,  0)
+        //       5 : ( 0,  0,  1)
+        //       6 : ( 0,  0, -1)
+        //       0 : 不渲染
+        // 亮度 * 7 + 法线
+        uint64_t id;
+        if (unoccupied_ids.empty()) {
+            id = _size++;
+        } else {
+            id = unoccupied_ids[unoccupied_ids.size() - 1];
+            unoccupied_ids.pop_back();
+        }
+        data.resize(_size * 4 * 7);
+        std::copy(vertices.begin(), vertices.end(), data.begin() + id * 4 * 7);
+        return id;
+    }
+    inline void erase(uint32_t id) {
+        fill(data.begin() + id * 4 * 7, data.begin() + (id + 1) * 4 * 7, 0.0f);
+        unoccupied_ids.push_back(id);
+    }
+    inline void change_data(uint32_t id, const std::array<float, 4 * 7> &vertices) {
+        copy(vertices.begin(), vertices.end(), data.begin() + id * 4 * 7);
+    }
+    inline float *get_data_ptr(uint32_t id) {
+        return data.data() + id * 4 * 7;
+    }
+    inline size_t size() const {
+        return data.size();
+    }
+};
+
+struct Sector {
+    std::array<Block, 16 * 256 * 16> blocks;
+    std::unordered_map<Block_pos, std::map<std::string, std::string>, Block_pos_hash> NBTs;
+    std::array<int, 16 * 16> data;
+    std::array<int, 16 * 16> biome;
+    GL_QUADS_vbo_data vertex_data_struct;
+    // 区块内方块坐标的index值(get_block_index)  之前的渲染状态
+    // vector:面的id为索引，内容是VBO内的ID
+    std::unordered_map<int, std::pair<uint64_t, std::vector<uint32_t>>> shown;
+    Sector() {
+        blocks.fill(air);
+    }
+};
+
+constexpr std::array<uint16_t, 6> textures[] = {{0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}, {0, 2, 1, 1, 1, 1}, {2, 2, 2, 2, 2, 2}, {4, 4, 4, 4, 4, 4},
+                                                {3, 3, 3, 3, 3, 3}, {5, 5, 6, 6, 6, 6}, {7, 7, 7, 7, 7, 7}, {8, 8, 8, 8, 8, 8}};
+constexpr float uvs[] = {0.0f, 0.0f, -1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 1.0f, -1.0f};  // -1.0用于和顶点三个数据对齐
+constexpr bool transparent_blocks[] = {false, true, false, false, false, false, false, true, false};
+
+struct entity_box {
+    double minx, maxx, miny, maxy, minz, maxz;
+    auto operator<=>(const entity_box &) const = default;
+};
+
+const std::set<entity_box> entity_entity_boxes[] = {
+    std::set<entity_box>({entity_box{-0.3, 0.3, -0.5, 1.3, -0.3, 0.3}}),
+};
+const std::set<entity_box> block_entity_boxes[] = {
+    std::set<entity_box>(),
+    std::set<entity_box>(),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+    std::set<entity_box>({entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}),
+};
+
+constexpr Block_pos normals[7] = {
+    {0, 0, 0}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
+};
+
+inline bool AABB(const entity_box &a, const entity_box &b, Pos da, Pos db) {
     /* 如果没有碰撞返回False */
-    if (a.maxx + da.x < b.minx + db.x || b.maxx + db.x < a.minx + da.x || a.maxy + da.y < b.miny + db.y || b.maxy + db.y < a.miny + da.y || a.maxz + da.z < b.minz + db.z || b.maxz + db.z < a.minz + da.z)
-        return false;
-    return true;
+    return !(a.maxx + da.x < b.minx + db.x || b.maxx + db.x < a.minx + da.x || a.maxy + da.y < b.miny + db.y || b.maxy + db.y < a.miny + da.y || a.maxz + da.z < b.minz + db.z ||
+             b.maxz + db.z < a.minz + da.z);
 }
 
-inline float terrain_fluctuate_calc(float n)
-{
-    if (n <= 0.3)
+inline float terrain_fluctuate_calc(float n) {
+    if (n <= 0.3) {
         return 1.5;
-    else if (n > 0.3 && n <= 0.8)
+    } else if (n > 0.3 && n <= 0.8) {
         return n * 25 - 6;
-    else
+    } else {
         return 14;
+    }
 }
 
-inline float hole_calc(int n)    // n是高度
-{
-    if (n < 10)
+// n是高度
+inline float hole_calc(int n) {
+    if (n < 10) {
         return n * 0.1f;
-    if (n <= 40)
+    }
+    if (n <= 40) {
         return 1.0f;
-    if (n < 60)
+    }
+    if (n < 60) {
         return 1.0f - (n - 40) * 0.05f;
-    else
+    } else {
         return 0.0f;
+    }
 }
 
 inline float hash2D(int x, int z, int seed) {
-    unsigned int n = (unsigned int)seed + (unsigned int)x * 374761393u + (unsigned int)z * 668265263u;
+    uint64_t n = (uint64_t)seed + (uint64_t)x * 374761393u + (uint64_t)z * 668265263u;
     n = (n ^ (n >> 13)) * 1274126177u;
-    return (float)((n ^ (n >> 16)) & 0x7fffffff) / 0x7fffffff;
+    return ((n ^ (n >> 16)) & 0x7fffffff) / (float)(0x7fffffff);
 }
 
-const string biome_id[] =
-{
+const std::string biome_id[] = {
     "biome.minecraft.plain",
     "biome.minecraft.mountain",
     "biome.minecraft.forest",
     "biome.minecraft.highland",
 };
 // 参数范围 [-1, 1]
-//                                  整体高度        地形起伏         植被（树）密度      雨量
-inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
-{
-    if (-1 <= altitude && altitude <  0 && -1 <= fluctuate && fluctuate <  0 && -1 <= tree_density && tree_density <  0) return 0u;    // plain
-    if (-1 <= altitude && altitude <  1 &&  0 <= fluctuate && fluctuate <= 1 && -1 <= tree_density && tree_density <= 1) return 1u;    // mountain
-    if (-1 <= altitude && altitude <  0 && -1 <= fluctuate && fluctuate <  0 &&  0 <= tree_density && tree_density <= 1) return 2u;    // forest
-    if ( 0 <= altitude && altitude <  1 && -1 <= fluctuate && fluctuate <  0 && -1 <= tree_density && tree_density <= 1) return 3u;    // highland
-    return -1u;
+//                         整体高度        地形起伏         植被（树）密度 雨量
+inline int get_biome(float altitude, float fluctuate, float tree_density, float rain) {
+    if (-1 <= altitude && altitude < 0 && -1 <= fluctuate && fluctuate < 0 && -1 <= tree_density && tree_density < 0) {
+        return 0;  // plain
+    }
+    if (-1 <= altitude && altitude < 1 && 0 <= fluctuate && fluctuate <= 1 && -1 <= tree_density && tree_density <= 1) {
+        return 1;  // mountain
+    }
+    if (-1 <= altitude && altitude < 0 && -1 <= fluctuate && fluctuate < 0 && 0 <= tree_density && tree_density <= 1) {
+        return 2;  // forest
+    }
+    if (0 <= altitude && altitude < 1 && -1 <= fluctuate && fluctuate < 0 && -1 <= tree_density && tree_density <= 1) {
+        return 3;  // highland
+    }
+    return -1;
 }
 
-struct LCG
-{
-    unsigned int now;
-    LCG(unsigned int seed)
-    {
-        now = seed;
-    }
-    inline unsigned int next()
-    {
-        return (now = now * 1664525u + 1013904223u);
-    }
-};
-
-inline vector<float> normalize(float x, float y, float z)
-{
+inline std::tuple<float, float, float> normalize(float x, float y, float z) {
     float tmp = sqrt(x * x + y * y + z * z);
     return {x / tmp, y / tmp, z / tmp};
 }
 
-struct World
-{
-    unordered_map<Sector_pos, Sector*, Sector_pos_hash> world;
-    int stoped_threads = 0;
+class World {
+private:
+    std::unordered_map<Sector_pos, Sector *, Sector_pos_hash> world;
+    std::unordered_set<Sector_pos, Sector_pos_hash> full_light_calc_flag;
     int simulate_distance;
-    unordered_set<Sector_pos, Sector_pos_hash> simulate_sectors, decorate_sectors, generate_holes_sectors;
-    list<string> operations;    //双链表，可以O(1)连接两个链表，在generate_sector中使用
-    map<string, set<entity_box>> block_entity_boxes;
-    map<string, set<entity_box>> entity_entity_boxes;
+    std::unordered_set<Sector_pos, Sector_pos_hash> simulate_sectors, decorate_sectors, generate_holes_sectors;
+    std::list<std::string> operations;  // 双链表，可以O(1)连接两个链表，在generate_sector中使用
     Pos position;
-    unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes;
-    unordered_map<Sector_pos, bitset<16 * 256 * 16>, Sector_pos_hash> holes;    // true即洞穴
+    std::unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes, calced_light_sectors;
+    std::unordered_map<Sector_pos, std::bitset<16 * 256 * 16>, Sector_pos_hash> holes;  // true即洞穴
     FastNoise::SmartNode<> noise;
     FastNoise::SmartNode<> terrain_noise_generater;
     int seed;
-    // 添加互斥锁，使用 recursive_mutex 允许同一个线程多次加锁
-    mutable recursive_mutex world_mutex;    // world
-    mutable recursive_mutex operations_mutex;    // operations
-    mutable recursive_mutex position_mutex;    // position
 
-    World(int seed_arg, int simulate_distance_arg)
-    {
-        ++simulate_distance_arg;
+    // 添加互斥锁，使用 recursive_mutex 允许同一个线程多次加锁
+    mutable std::recursive_mutex world_mutex;       // world
+    mutable std::recursive_mutex operations_mutex;  // operations
+    mutable std::recursive_mutex position_mutex;    // position
+    // 对于多线程数据竞争的问题，现在除了主线程，另外有一个 process_sector_thread
+    // 的线程，这个线程处理的都是边缘的区块。 主线程只有python调用 add_block,
+    // remove_block, get_block, hit_test, intersect 会触发对 world
+    // 的访问，且只会与玩家所在的区块相关。
+    // unordered_map.at操作是线程安全的，所以除了 generate_sector 中 operator[],
+    // 其他process_sector_thread 中调用的函数不需要加锁。
+
+    int stoped_threads = 0;
+
+    void stop_all_thread() {
+        stoped_threads = 1;
+        while (stoped_threads < 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+    }
+
+    Block *find_block(int x, int y, int z) const {
+        if (y < 0 || y >= 256) {
+            return &sector_not_loaded;
+        }
+        Sector_pos sector = get_sector(x, z);
+        if (world.count(sector) == 0) {  // 区块没有加载
+            return &sector_not_loaded;
+        }
+        return &(world.at(sector)->blocks[get_block_index(x, y, z)]);  // world[sector]不是const
+    }
+
+    inline Block *find_block(const Block_pos &p) const {
+        return find_block(p.x, p.y, p.z);
+    }
+
+    void process_sector_thread() {
+        Sector_pos player_sector, now;
+        while (!stoped_threads) {
+            int x, z;
+            {
+                std::lock_guard<std::recursive_mutex> lock_position(position_mutex);
+                x = position.x, z = position.z;
+            }
+            player_sector = get_sector(x, z);
+            // 生成洞穴
+            for (Sector_pos ds : generate_holes_sectors) {
+                now = player_sector + ds;
+                if (!generated_holes.count(now)) {
+                    generated_holes.insert(now);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 16, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 48, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
+                }
+            }
+            // 生成区块
+            for (Sector_pos ds : simulate_sectors) {
+                now = player_sector + ds;
+                if (!generated_sectors.count(now)) {
+                    generated_sectors.insert(now);
+                    shown_sectors.insert(now);
+                    generate_sector(now.x, now.y);
+                    calc_sector_light(now.x, now.y);
+                }
+            }
+            // 装饰区块
+            for (Sector_pos ds : decorate_sectors) {
+                now = player_sector + ds;
+                if (!decorated_sectors.count(now)) {
+                    decorated_sectors.insert(now);
+                    generate_tree(now.x, now.y);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        ++stoped_threads;
+    }
+
+    void generate_sector(int dx, int dy) {
+        Sector *sector = new Sector;
+        std::bitset<16 * 256 * 16> hole = holes.at({dx, dy});
+        holes.erase({dx, dy});
+        //                                整体高度        地形起伏         植被（树）密度 雨量
+        // inline int32_t get_biome(float altitude, float fluctuate, float tree_density, float rain)
+        std::array<float, 16 * 16> noise_altitude, noise_fluctuate, noise_terrain, noise_tree_density, noise_rain;
+        Sector_pos p = {dx, dy};
+        dx *= 16, dy *= 16;
+        // float tmp;
+        int height1, height2;
+        noise->GenUniformGrid2D(noise_altitude.data(), dx * 0.05f, dy * 0.05f, 16, 16, 0.05f, 0.05f, seed);
+        noise->GenUniformGrid2D(noise_fluctuate.data(), dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed + 1);
+        terrain_noise_generater->GenUniformGrid2D(noise_terrain.data(), dx * 2, dy * 2, 16, 16, 2, 2, seed + 1);
+        noise->GenUniformGrid2D(noise_tree_density.data(), dx * 0.5f, dy * 0.5f, 16, 16, 0.5f, 0.5f, seed + 2);
+        noise->GenUniformGrid2D(noise_rain.data(), dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 3);
+        for (int x = 0; x != 16; ++x) {
+            for (int z = 0; z != 16; ++z) {
+                height1 = noise_altitude[z * 16 + x] * 40 + 40 + 64 + (noise_terrain[z * 16 + x] + 1) * terrain_fluctuate_calc(noise_fluctuate[z * 16 + x] * 0.5f + 0.5f) +
+                          pow((noise_fluctuate[z * 16 + x] + 1) / 2, 2) * 20;
+                height2 = height1 + 5;
+                sector->blocks[get_block_index(x, 0, z)].id = 5;  // bedrock
+                for (int y = 1; y < height1; ++y)
+                    if (!hole[(x * 16 + z) * 256 + y])
+                        sector->blocks[get_block_index(x, y, z)].id = 4;  // stone
+                for (int y = height1; y < height2; ++y)
+                    if (!hole[(x * 16 + z) * 256 + y])
+                        sector->blocks[get_block_index(x, y, z)].id = 3;  // dirt
+                if (!hole[(x * 16 + z) * 256 + height2]) {
+                    sector->blocks[get_block_index(x, height2, z)].id = 2;  // grass_block
+                } else {
+                    full_light_calc_flag.insert(p);
+                }
+                sector->data[x * 16 + z] = height2;
+                sector->biome[x * 16 + z] = get_biome(noise_altitude[z * 16 + x], noise_fluctuate[z * 16 + x], noise_tree_density[z * 16 + x], noise_rain[z * 16 + x]);
+            }
+        }
+        {
+            std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+            world[p] = sector;
+        }
+        // 让矿洞中的光跨区块传播
+        if (full_light_calc_flag.count(p)) {
+            goto brk;
+        }
+        if (world.count(p + Sector_pos{1, 0})) {
+            for (int z = 0; z != 16; ++z) {
+                for (int y = 0; y != 256; ++y) {
+                    if (find_block(15 + dx, y, z + dy)->id == 1 && find_block(16 + dx, y, z + dy)->light > 1) {
+                        full_light_calc_flag.insert(p);
+                        goto brk;
+                    }
+                }
+            }
+        }
+        if (world.count(p + Sector_pos{0, 1})) {
+            for (int x = 0; x != 16; ++x) {
+                for (int y = 0; y != 256; ++y) {
+                    if (find_block(x + dx, y, 15 + dy)->id == 1 && find_block(x + dx, y, 16 + dy)->light > 1) {
+                        full_light_calc_flag.insert(p);
+                        goto brk;
+                    }
+                }
+            }
+        }
+        if (world.count(p + Sector_pos{-1, 0})) {
+            for (int z = 0; z != 16; ++z) {
+                for (int y = 0; y != 256; ++y) {
+                    if (find_block(dx, y, z + dy)->id == 1 && find_block(-1 + dx, y, z + dy)->light > 1) {
+                        full_light_calc_flag.insert(p);
+                        goto brk;
+                    }
+                }
+            }
+        }
+        if (world.count(p + Sector_pos{0, -1})) {
+            for (int x = 0; x != 16; ++x) {
+                for (int y = 0; y != 256; ++y) {
+                    if (find_block(x + dx, y, dy)->id == 1 && find_block(x + dx, y, -1 + dy)->light > 1) {
+                        full_light_calc_flag.insert(p);
+                        goto brk;
+                    }
+                }
+            }
+        }
+    brk:;
+        /*
+        // 区块边缘的方块
+        for (int z = 1; z != 15; ++z)
+            for (int y = 0; y != 256; ++y)
+                update_shown(dx, y, z + dy, exposed(dx, y, z + dy));
+        for (int z = 1; z != 15; ++z)
+            for (int y = 0; y != 256; ++y)
+                update_shown(15 + dx, y, z + dy, exposed(15 + dx, y, z + dy));
+        for (int x = 0; x != 16; ++x)
+            for (int y = 0; y != 256; ++y)
+                update_shown(x + dx, y, dy, exposed(x + dx, y, dy));
+        for (int x = 0; x != 16; ++x)
+            for (int y = 0; y != 256; ++y)
+                update_shown(x + dx, y, 15 + dy, exposed(x + dx, y, 15 + dy));*/
+        // 周围区块边缘的方块
+        /*if (world.count({old_dx + 1, old_dy}))
+            for (int z = 0; z != 16; ++z)
+                for (int y = 0; y != 256; ++y)
+                    update_shown(16 + dx, y, z + dy, exposed(16 + dx, y, z + dy));
+        if (world.count({old_dx, old_dy + 1}))
+            for (int x = 0; x != 16; ++x)
+                for (int y = 0; y != 256; ++y)
+                    update_shown(x + dx, y, 16 + dy, exposed(x + dx, y, 16 + dy));
+        if (world.count({old_dx - 1, old_dy}))
+            for (int z = 0; z != 16; ++z)
+                for (int y = 0; y != 256; ++y)
+                    update_shown(-1 + dx, y, z + dy, exposed(-1 + dx, y, z + dy));
+        if (world.count({old_dx, old_dy - 1}))
+            for (int x = 0; x != 16; ++x)
+                for (int y = 0; y != 256; ++y)
+                    update_shown(x + dx, y, -1 + dy, exposed(x + dx, y, -1 + dy));*/
+        // 这里不需要，generate_tree会update_vbo_data
+        /*int old_dx = p.x, old_dy = p.y;
+        std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
+        operations.push_back(std::format("update_vbo_data {} {}", old_dx, old_dy));
+        if (world.count({old_dx + 1, old_dy})) {
+            operations.push_back(std::format("update_vbo_data {} {}", old_dx + 1, old_dy));
+        }
+        if (world.count({old_dx, old_dy + 1})) {
+            operations.push_back(std::format("update_vbo_data {} {}", old_dx, old_dy + 1));
+        }
+        if (world.count({old_dx - 1, old_dy})) {
+            operations.push_back(std::format("update_vbo_data {} {}", old_dx - 1, old_dy));
+        }
+        if (world.count({old_dx, old_dy - 1})) {
+            operations.push_back(std::format("update_vbo_data {} {}", old_dx, old_dy - 1));
+        }*/
+    }
+
+    bool has_tree(int x, int z, float tree_calc_value) {
+        float hash = hash2D(x, z, seed);
+        if (hash <= 1.0f - tree_calc_value)
+            return false;
+        for (int dx = -3; dx <= 3; ++dx)
+            for (int dz = -3; dz <= 3; ++dz) {
+                if (dx == 0 && dz == 0)
+                    continue;
+                if (dx * dx + dz * dz <= 9 && hash2D(x + dx, z + dz, seed) >= hash)
+                    return false;
+            }
+        return true;
+    }
+
+    void generate_tree(int sx, int sy) {
+        Sector *sector = world.at({sx, sy});
+        float tree_density;
+        for (int x = 0, y; x != 16; ++x) {
+            for (int z = 0; z != 16; ++z) {
+                y = sector->data[x * 16 + z];
+                switch (sector->biome[x * 16 + z]) {
+                    case 0:  // plain
+                        tree_density = 0.0015f;
+                        break;
+                    case 1:  // mountain
+                        tree_density = 0.005f;
+                        break;
+                    case 2:  // forest
+                        tree_density = 0.03f;
+                        break;
+                    case 3:  // highland
+                        tree_density = 0.0005f;
+                        break;
+                    default:
+                        tree_density = 0.0f;
+                }
+                if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[get_block_index(x, y, z)].id != 1) {
+                    for (int dy = 1; dy < 6; ++dy) {
+                        add_block(sx * 16 + x, y + dy, sy * 16 + z, 6, false);
+                    }
+                    for (int dx = -2; dx <= 2; ++dx) {
+                        for (int dz = -2; dz <= 2; ++dz) {
+                            for (int dy = 3; dy <= 4; ++dy) {
+                                add_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, 7, false);
+                            }
+                        }
+                    }
+                    for (int dx = -1, dy = 5; dx <= 1; ++dx) {
+                        for (int dz = -1; dz <= 1; ++dz) {
+                            add_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, 7, false);
+                        }
+                    }
+                    for (int dx = -1, dy = 6; dx <= 1; ++dx) {
+                        for (int dz = -1; dz <= 1; ++dz) {
+                            if (abs(dx) + abs(dz) >= 2)
+                                continue;
+                            add_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, 7, false);
+                        }
+                    }
+                    for (int dx = -5; dx <= 5; ++dx) {
+                        for (int dz = -5; dz <= 5; ++dz) {
+                            for (int dy = -1; dy <= 9; ++dy) {
+                                update_shown(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, exposed(sx * 16 + x + dx, y + dy, sy * 16 + z + dz));
+                            }
+                        }
+                    }
+                    for (int dx = -5; dx <= 5; ++dx) {
+                        for (int dz = -5; dz <= 5; ++dz) {
+                            for (int dy = -1; dy <= 9; ++dy) {
+                                std::vector<Block_pos> updated_brightness_blocks = calc_light(sx * 16 + x + dx, y + dy, sy * 16 + z + dz);
+                                for (const Block_pos &p : updated_brightness_blocks) {
+                                    update_shown(p, exposed(p), true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
+        operations.push_back(std::format("update_vbo_data {} {}", sx, sy));
+        operations.push_back(std::format("update_vbo_data {} {}", sx + 1, sy));
+        operations.push_back(std::format("update_vbo_data {} {}", sx, sy + 1));
+        operations.push_back(std::format("update_vbo_data {} {}", sx - 1, sy));
+        operations.push_back(std::format("update_vbo_data {} {}", sx, sy - 1));
+        operations.push_back(std::format("update_vbo_data {} {}", sx + 1, sy + 1));
+        operations.push_back(std::format("update_vbo_data {} {}", sx - 1, sy + 1));
+        operations.push_back(std::format("update_vbo_data {} {}", sx - 1, sy - 1));
+        operations.push_back(std::format("update_vbo_data {} {}", sx + 1, sy - 1));
+    }
+
+    // 洞穴最大长度：64, 每次以玩家为圆心，simulate_distance +
+    // 5为半径，在圆上每个区块（随机高度）生成洞穴。
+    void generate_holes(float x, float y, float z) {
+        float dx[64], dy[64], dz[64], size[64];
+        int length = (hash2D(x, y, seed) + hash2D(y, z, seed) + hash2D(z, x, seed)) * 64 / 6 + 32;  // [32, 64]
+        noise->GenUniformGrid2D(dx, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed);
+        noise->GenUniformGrid2D(dy, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 1);
+        noise->GenUniformGrid2D(dz, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed + 2);
+        noise->GenUniformGrid2D(size, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 3);
+        std::tuple<float, float, float> tmp;
+        float size_float;
+        for (int i = 0, size_int, x_int, y_int, z_int, final_x, final_y, final_z; i < length; ++i) {
+            tmp = normalize(dx[i], dy[i] * 0.5, dz[i]);
+            x += std::get<0>(tmp), y += std::get<1>(tmp), z += std::get<2>(tmp);
+            x_int = x, y_int = y, z_int = z;
+            size_float = size[i] * 1.5 + 3.5;
+            size_int = (int)size_float + 1;
+            for (int bx = -size_int; bx <= size_int; ++bx)
+                for (int by = -size_int; by <= size_int; ++by)
+                    for (int bz = -size_int; bz <= size_int; ++bz)
+                        if (bx * bx + by * by + bz * bz <= size_float * size_float) {
+                            final_x = x_int + bx, final_y = y_int + by, final_z = z_int + bz;
+                            if (final_y <= 0 || final_y >= 256)
+                                break;
+                            holes[get_sector(final_x, final_z)][get_block_index(final_x, final_y, final_z)] = true;
+                        }
+        }
+    }
+
+    std::vector<Block_pos> calc_light(int x, int y, int z) {
+        // 返回要更新亮度的实体方块
+        std::queue<Block_pos> bfs;
+        bfs.push({x, y, z});
+        uint8_t tmp_light;
+        Block *neighbor;
+        std::vector<Block_pos> updated;
+        std::unordered_set<Block_pos, Block_pos_hash> vst;
+        Block_pos now;
+        uint8_t final_light;
+        // 方块光照
+        while (!bfs.empty()) {
+            now = bfs.front();
+            bfs.pop();
+            tmp_light = 0u;
+            for (int i = 0; i < 6; ++i) {
+                neighbor = find_block(now + FACES[i]);
+                tmp_light = std::max<uint8_t>(tmp_light, neighbor->light & 15);
+            }
+            final_light = std::max<uint8_t>(block_light[find_block(now)->id], tmp_light - std::min<uint8_t>(tmp_light, light_attenuation[find_block(now)->id]));
+            if ((find_block(now)->light & 15) != final_light) {
+                find_block(now)->light = final_light + (find_block(now)->light & 240);
+                for (int i = 0; i < 6; ++i) {
+                    neighbor = find_block(now + FACES[i]);
+                    if (neighbor->id == 0) {
+                        continue;
+                    }
+                    if (neighbor->id == 1) {
+                        bfs.push(now + FACES[i]);
+                    } else {
+                        if (vst.count(now + FACES[i]) == 0) {
+                            updated.push_back(now + FACES[i]);
+                            vst.insert(now + FACES[i]);
+                        }
+                    }
+                }
+            }
+        }
+        bfs.push({x, y, z});
+        // 天空光照
+        while (!bfs.empty()) {
+            now = bfs.front();
+            bfs.pop();
+            tmp_light = 0u;
+            for (int i = 0; i < 6; ++i) {
+                neighbor = find_block(now + FACES[i]);
+                tmp_light = std::max<uint8_t>(tmp_light, neighbor->light & 240);
+            }
+            final_light = tmp_light - std::min<uint8_t>(tmp_light, 16 * light_attenuation[find_block(now)->id]);
+            if (now.y == 255 || (find_block(now)->id == 1 && find_block(now + Block_pos{0, 1, 0})->id == 1 && (find_block(now + Block_pos{0, 1, 0})->light & 240) == 240)) {
+                final_light = 240;
+            }
+            if ((find_block(now)->light & 240) != final_light) {
+                find_block(now)->light = final_light + (find_block(now)->light & 15);
+                for (int i = 0; i < 6; ++i) {
+                    neighbor = find_block(now + FACES[i]);
+                    if (neighbor->id == 0) {
+                        continue;
+                    }
+                    if (transparent_blocks[neighbor->id]) {
+                        bfs.push(now + FACES[i]);
+                    }
+                    if (neighbor->id != 1) {
+                        if (vst.count(now + FACES[i]) == 0) {
+                            updated.push_back(now + FACES[i]);
+                            vst.insert(now + FACES[i]);
+                        }
+                    }
+                }
+            }
+        }
+        return updated;
+    }
+
+    inline std::vector<Block_pos> calc_light(Block_pos p) {
+        return calc_light(p.x, p.y, p.z);
+    }
+
+    void calc_sector_light(int dx, int dy) {
+        Sector_pos p = {dx, dy};
+        Sector *sector = world.at(p);
+        dx *= 16, dy *= 16;
+        // std::unordered_set<Sector_pos, Sector_pos_hash> updated_vbos;
+        //  这里不需要加锁，unordered_map.at操作是线程安全的，调用calc_sector_light时不会有别的线程访问这个区块
+        //  (见process_sector_thread)
+        //  std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        //  uint8_t tmp_light, final_light;
+        //  Block *neighbor;
+        for (int x = 0, idx = 0; x < 16; ++x) {
+            for (int z = 0; z < 16; ++z) {
+                for (int y = 0; y < 256; ++y, ++idx) {
+                    if (y > sector->data[x * 16 + z]) {
+                        sector->blocks[idx].light = (15 << 4) + 0;
+                        continue;
+                    }
+                    if (!transparent_blocks[sector->blocks[idx].id]) {
+                        continue;
+                    }
+                }
+            }
+        }
+        std::unordered_set<Sector_pos, Sector_pos_hash>::iterator it;
+        if ((it = full_light_calc_flag.find(p)) != full_light_calc_flag.end()) {
+            for (int x = 0; x < 16; ++x) {
+                for (int z = 0; z < 16; ++z) {
+                    for (int y = 0; y <= sector->data[x * 16 + z]; ++y) {
+                        calc_light(x + dx, y, z + dy);
+                    }
+                }
+            }
+            full_light_calc_flag.erase(it);
+        }
+        for (int x = -1; x <= 16; ++x) {
+            for (int z = -1; z <= 16; ++z) {
+                std::unordered_map<Sector_pos, Sector *, Sector_pos_hash>::iterator sector = world.find(get_sector(dx + x, z + dy));
+                if (sector != world.end()) {
+                    for (int y = 0; y <= sector->second->data[mod16(x) * 16 + mod16(z)]; ++y) {
+                        update_shown(dx + x, y, z + dy, exposed(dx + x, y, z + dy));
+                    }
+                }
+            }
+        }
+        /*std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
+        for (const Sector_pos &i : updated_vbos) {
+            operations.push_back(std::format("update_vbo_data {} {}", i.x, i.y));
+        }*/
+    }
+
+    void check_neighbors(int x, int y, int z) {
+        Block_pos p = {x, y, z};
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        for (int i = 0; i < 6; ++i) {
+            update_shown(p + FACES[i], exposed(p + FACES[i]));
+        }
+    }
+
+    void update_shown(int x, int y, int z, uint64_t shown, bool force_update = false) {
+        // 如果force_update，会强制重新生成显示的面的顶点数据，用于光照更新，但此时要保证面的显示情况和之前相同
+        Sector_pos sector_pos = get_sector(x, z);
+        if (world.count(sector_pos) == 0)
+            return;
+        Sector *sector = world.at(sector_pos);
+        uint64_t mask;
+        uint16_t id = find_block(x, y, z)->id;
+        int index = get_block_index(x, y, z);
+        uint16_t change_width;
+        if (!sector->shown.count(index)) {
+            change_width = std::bit_width(shown);
+            sector->shown[index].first = 0;
+            sector->shown[index].second.resize(change_width);
+        } else {
+            change_width = std::bit_width(shown ^ sector->shown[index].first);
+            sector->shown[index].second.resize(std::max(std::bit_width(sector->shown[index].first), std::bit_width(shown)));
+        }
+        if (force_update) {
+            change_width = std::bit_width(shown);
+        }
+        std::array<float, 4 * 7> vertex_texture_data;
+        for (uint16_t i = 0; i != change_width; ++i) {
+            mask = 1ull << i;
+            if (force_update) {
+                if (shown & mask) {
+                    get_tex_array_data(x, y, z, id, i, vertex_texture_data);
+                    sector->vertex_data_struct.change_data(sector->shown[index].second[i], vertex_texture_data);
+                }
+            } else if ((shown & mask) != (sector->shown[index].first & mask)) {
+                if (shown & mask) {
+                    get_tex_array_data(x, y, z, id, i, vertex_texture_data);
+                    sector->shown[index].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                } else {
+                    sector->vertex_data_struct.erase(sector->shown[index].second[i]);
+                }
+            }
+        }
+        sector->shown[index].first = shown;
+        if (shown)
+            sector->shown[index].second.resize(std::bit_width(shown));
+        else
+            sector->shown.erase(index);
+    }
+
+    inline void update_shown(const Block_pos &p, uint64_t shown, bool force_update = false) {
+        update_shown(p.x, p.y, p.z, shown, force_update);
+    }
+
+    void get_tex_array_data(int x, int y, int z, uint32_t id, int face_index, std::array<float, 4 * 7> &res) const {
+        // 不能通过find_block获取id，因为有些时候（比如generate_sector中）find_block会返回Sector_not_loaded
+        int img_idx = textures[id][face_index];
+        std::array<std::array<float, 13>, 6> vertices;
+        cube_vertices(x, y, z, 0.5, vertices);
+        uint8_t light;
+        Block_pos p = {x, y, z};
+        for (uint32_t i = 0, j = 0, brightness; i != 4 * 7; i += 7, j += 3) {
+            res[i] = vertices[face_index][j];
+            res[i + 1] = vertices[face_index][j + 1];
+            res[i + 2] = vertices[face_index][j + 2];
+            res[i + 3] = uvs[j];
+            res[i + 4] = uvs[j + 1];
+            res[i + 5] = img_idx;
+            if (transparent_blocks[find_block(p)->id] && (!transparent_blocks[find_block(p + normals[(int)vertices[face_index][12]])->id])) {
+                light = find_block(p)->light;
+            } else {
+                light = find_block(p + normals[(int)vertices[face_index][12]])->light;
+            }
+            brightness = std::max(light >> 4, light & 15);
+            res[i + 6] = brightness * 7 + vertices[face_index][12];
+        }
+    }
+
+    uint64_t exposed(int x, int y, int z) const {
+        if (find_block(x, y, z)->id == 0 || find_block(x, y, z)->id == 1) {
+            return 0ull;
+        }
+        uint64_t res = 0ull;
+        Block_pos p = {x, y, z};
+        for (int i = 0, dx, dy, dz; i < 6; ++i) {
+            dx = FACES[i].x, dy = FACES[i].y, dz = FACES[i].z;
+            // 同样的透明方块之间的面一个隐藏，一个显示
+            if (y + dy < 0 || y + dy >= 256) {
+                res |= (1ull << i);
+            } else if (transparent_blocks[find_block(p)->id] && (!transparent_blocks[find_block(p + FACES[i])->id])) {
+                res |= (1ull << i);
+            } else if (transparent_blocks[find_block(p + FACES[i])->id] && find_block(p + FACES[i])->id != find_block(p)->id) {
+                res |= (1ull << i);
+            } else if (transparent_blocks[find_block(p + FACES[i])->id] && find_block(p + FACES[i])->id == find_block(p)->id && (dx == 1 || dy == 1 || dz == 1)) {
+                res |= (1ull << i);
+            }
+        }
+        return res;
+    }
+
+    inline uint64_t exposed(const Block_pos &p) {
+        return exposed(p.x, p.y, p.z);
+    }
+
+public:
+    World(int seed_arg, int simulate_distance_arg) {
+        simulate_distance_arg += 2;
         noise = FastNoise::NewFromEncodedNodeTree("DQkR@BSEMJBw@AEhDBAMAAMhCDA==");
-        ifstream nodetree_file;
-        nodetree_file.open("NodeTree.txt", ios::in);
-        string nodetree_string;
-        nodetree_file >> nodetree_string;
-        nodetree_file.close();
-        terrain_noise_generater = FastNoise::NewFromEncodedNodeTree(nodetree_string.c_str());
+        terrain_noise_generater = FastNoise::NewFromEncodedNodeTree("EQ@AJZDCQM@ABIQwQDAAD6QwQ=");
         seed = seed_arg;
         simulate_distance = simulate_distance_arg;
         for (int x = -simulate_distance; x <= simulate_distance; ++x)
@@ -345,651 +890,186 @@ struct World
             for (int y = -simulate_distance - 5; y <= simulate_distance + 5; ++y)
                 if (x * x + y * y <= (simulate_distance + 5) * (simulate_distance + 5))
                     generate_holes_sectors.insert({x, y});
-        for (int x = -simulate_distance; x <= simulate_distance; ++x)
-            for (int y = -simulate_distance; y <= simulate_distance; ++y)
-            {
+        for (int x = -simulate_distance; x <= simulate_distance; ++x) {
+            for (int y = -simulate_distance; y <= simulate_distance; ++y) {
                 bool flag = true;
-                for (int i = 0, dx, dy; i < 8; ++i)
-                {
-                    dx = SECTOR_FACES[i][0], dy = SECTOR_FACES[i][1];
-                    if (!simulate_sectors.count({x + dx, y + dy}))
-                    {
+                for (int i = 0, dx, dy; i < 8; ++i) {
+                    dx = SECTOR_FACES[i].x, dy = SECTOR_FACES[i].y;
+                    if (!simulate_sectors.count({x + dx, y + dy})) {
                         flag = false;
                         break;
                     }
                 }
-                if (flag)
+                if (flag) {
                     decorate_sectors.insert({x, y});
+                }
             }
-        for (Sector_pos hole_pos : generate_holes_sectors)
-        {
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 16, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 48, hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+        }
+        for (Sector_pos hole_pos : generate_holes_sectors) {
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 16,
+                           hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
+            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 48,
+                           hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
             generated_holes.insert(hole_pos);
         }
     };
 
-    ~World()
-    {
+    ~World() {
         stop_all_thread();
-        for (auto& pair : world) delete pair.second;
+        for (auto &pair : world)
+            delete pair.second;
     }
 
-    void stop_all_thread()
-    {
-        stoped_threads = 1;
-        while (stoped_threads < 2)
-            this_thread::sleep_for(chrono::milliseconds(200));
-    }
-
-    void set_position(double x, double y, double z)
-    {
-        lock_guard<recursive_mutex> lock_position(position_mutex);
+    void set_position(double x, double y, double z) {
+        std::lock_guard<std::recursive_mutex> lock_position(position_mutex);
         position = {x, y, z};
     }
 
-    Block* find_block(int x, int y, int z) const
-    {
-        if (y < 0 || y >= 256)
-            return &sector_not_loaded;
-        int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
-        int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
-        x = (x % 16 + 16) % 16;
-        z = (z % 16 + 16) % 16;
-        if (world.count({sector_x, sector_y}) == 0)    //区块没有加载
-            return &sector_not_loaded;
-        return (world.at({sector_x, sector_y})->blocks) + ((x * 16 + z) * 256 + y);    // world[sector]不是const
-    }
-
-    ull exposed(int x, int y, int z) const
-    {
-        if (find_block(x, y, z)->id == 0 || find_block(x, y, z)->id == 1)
-            return 0ull;
-        ull ret = 0ull;
-        for (int i = 0, dx, dy, dz; i < 6; ++i)
-        {
-            dx = FACES[i][0], dy = FACES[i][1], dz = FACES[i][2];
-            if (y + dy < 0 || y + dy >= 256)
-                ret |= (1ull << i);
-            // 同样的透明方块之间的面一个隐藏，一个显示
-            else if (transparent_blocks.count(find_block(x + dx, y + dy, z + dz)->id) && find_block(x + dx, y + dy, z + dz)->id != find_block(x, y, z)->id)
-                ret |= (1ull << i);
-            else if (transparent_blocks.count(find_block(x + dx, y + dy, z + dz)->id) && find_block(x + dx, y + dy, z + dz)->id == find_block(x, y, z)->id && \
-                 (dx == 1 || dy == 1 || dz == 1)
-            )
-                ret |= (1ull << i);
-        }
-        return ret;
-    }
-
-    void add_operation(string op)
-    {
-        lock_guard<recursive_mutex> lock_operations(operations_mutex);
+    void add_operation(std::string op) {
+        std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
         operations.push_back(op);
     }
 
-    void check_neighbors(int x, int y, int z)
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        for (int i = 0, dx, dy, dz, nx, ny, nz; i < 6; ++i)
-        {
-            dx = FACES[i][0], dy = FACES[i][1], dz = FACES[i][2];
-            nx = x + dx, ny = y + dy, nz = z + dz;
-            set_shown(nx, ny, nz, exposed(nx, ny, nz));
-        }
-    }
-
-    void update_shown(int x, int y, int z, ull shown)
-    {
-        int sector_x = (x >= 0) ? (x / 16) : ((x - 15) / 16);
-        int sector_y = (z >= 0) ? (z / 16) : ((z - 15) / 16);
-        if (world.count({sector_x, sector_y}) == 0)
-            return;
-        Sector* sector = world[{sector_x, sector_y}];
-        ull mask;
-        unsigned short id = find_block(x, y, z)->id;
-        if (!sector->shown.count({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}))
-        {
-            sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].first = 0;
-            sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second.resize(6);
-        }
-        for (unsigned short i = 0; i != 64; ++i)
-        {
-            mask = 1ull << i;
-            if ((shown & mask) != (sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].first & mask))
-            {
-                if (shown & mask)
-                {
-                    vector<float> vertex_texture_data = get_tex_array_data(id, i, x, y, z);
-                    sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
-                }
-                else
-                    sector->vertex_data_struct.erase(sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].second[i]);
-            }
-        }
-        sector->shown[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}].first = shown;
-        if (!shown)
-        {
-            sector->shown.erase({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16});
-        }
-    }
-
-    void add_block(int x, int y, int z, string sid, bool auto_process=true, bool has_NBT=false, const map<string, string> &NBT=emptyNBT)
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        unsigned short id = id_block.at(sid);
-        Block* block = find_block(x, y, z);
+    void add_block(int x, int y, int z, uint16_t id, bool auto_process = true, bool has_NBT = false, const std::map<std::string, std::string> &NBT = emptyNBT) {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        Block *block = find_block(x, y, z);
         if (block->id == 0 || block->id != 1)
             return;
-        if (auto_process)
-        {
+        if (auto_process) {
             Pos position_local;
             {
-                lock_guard<recursive_mutex> lock_position(position_mutex);
+                std::lock_guard<std::recursive_mutex> lock_position(position_mutex);
                 position_local = position;
             }
-            for (const entity_box &a : block_entity_boxes[sid])
-                for (const entity_box &b : entity_entity_boxes["entity.minecraft.player"])
+            for (const entity_box &a : block_entity_boxes[id])
+                for (const entity_box &b : entity_entity_boxes[0])
                     if (AABB(a, b, {(double)x, (double)y, (double)z}, position_local))
                         return;
         }
         block->id = id;
-        block->shown = 0;
-        if (has_NBT)
-        {
-            world[{get_sector(x), get_sector(z)}]->NBTs[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}] = NBT;
+        block->light = (0 << 4) + block_light[id];
+        if (has_NBT) {
+            world.at(get_sector(x, z))->NBTs[{(x % 16 + 16) % 16, y, (z % 16 + 16) % 16}] = NBT;
         }
-        if (auto_process)
-        {
-            set_shown(x, y, z, exposed(x, y, z));
+        if (auto_process) {
+            update_shown(x, y, z, exposed(x, y, z));
             check_neighbors(x, y, z);
-            lock_guard<recursive_mutex> lock_operations(operations_mutex);
-            operations.push_back(format("block_update {} {} {}", x, y, z));
-            operations.push_back(format("update_vbo_data {} {}", get_sector(x), get_sector(z)));
-            for (int i = 0, dx, dz, nx, nz; i < 6; ++i)
-            {
-                dx = FACES[i][0], dz = FACES[i][2];
-                nx = x + dx, nz = z + dz;
-                if (get_sector(nx) != get_sector(x) || get_sector(nz) != get_sector(z))
-                    operations.push_back(format("update_vbo_data {} {}", get_sector(nx), get_sector(nz)));
+            std::set<Sector_pos> updated_vbos;
+            std::vector<Block_pos> updated_brightness_blocks = calc_light(x, y, z);
+            for (const Block_pos &i : updated_brightness_blocks) {
+                update_shown(i, exposed(i), true);
+                updated_vbos.insert(get_sector(i.x, i.z));
+            }
+            if (transparent_blocks[id]) {
+                update_shown(x, y, z, exposed(x, y, z), true);
+            }
+            for (int i = 0; i < 6; ++i) {
+                std::vector<Block_pos> updated_brightness_blocks = calc_light(Block_pos{x, y, z} + FACES[i]);
+                for (const Block_pos &i : updated_brightness_blocks) {
+                    update_shown(i, exposed(i), true);
+                    updated_vbos.insert(get_sector(i.x, i.z));
+                }
+            }
+            updated_vbos.insert(get_sector(x, z));
+            for (int i = 0, dx, dz; i < 6; ++i) {
+                dx = FACES[i].x, dz = FACES[i].z;
+                updated_vbos.insert(get_sector(x + dx, z + dz));
+            }
+            std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
+            operations.push_back(std::format("block_update {} {} {}", x, y, z));
+            for (const Sector_pos &i : updated_vbos) {
+                operations.push_back(std::format("update_vbo_data {} {}", i.x, i.y));
             }
         }
     }
 
-    void remove_block(int x, int y, int z, bool auto_process=true)
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        Block* block = find_block(x, y, z);
+    void remove_block(const int x, const int y, const int z, bool auto_process = true) {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        Block *block = find_block(x, y, z);
         if (block->id == 0 || block->id == 1)
             return;
-        if (auto_process)
-            set_shown(x, y, z, 0ull);
-        unordered_map<tuple<int, int, int>, map<string, string>, Sector_block_pos_hash>::iterator it;
-        it = world[{get_sector(x), get_sector(z)}]->NBTs.find({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16});
-        if (it != world.at({get_sector(x), get_sector(z)})->NBTs.end())
-            world.at({get_sector(x), get_sector(z)})->NBTs.erase(it);
+        update_shown(x, y, z, 0ull);
+        std::unordered_map<Block_pos, std::map<std::string, std::string>, Block_pos_hash>::iterator it = world.at(get_sector(x, z))->NBTs.find({(x % 16 + 16) % 16, y, (z % 16 + 16) % 16});
+        if (it != world.at({get_sector(x, z)})->NBTs.end()) {
+            world.at({get_sector(x, z)})->NBTs.erase(it);
+        }
         (*block) = air;
-        if (auto_process)
-        {
+        if (auto_process) {
             check_neighbors(x, y, z);
-            lock_guard<recursive_mutex> lock_operations(operations_mutex);
-            operations.push_back(format("block_update {} {} {}", x, y, z));
-            operations.push_back(format("update_vbo_data {} {}", get_sector(x), get_sector(z)));
-            for (int i = 0, dx, dz, nx, nz; i < 6; ++i)
-            {
-                dx = FACES[i][0], dz = FACES[i][2];
-                nx = x + dx, nz = z + dz;
-                if (get_sector(nx) != get_sector(x) || get_sector(nz) != get_sector(z))
-                    operations.push_back(format("update_vbo_data {} {}", get_sector(nx), get_sector(nz)));
+            std::set<Sector_pos> updated_vbos;
+            std::vector<Block_pos> updated_brightness_blocks = calc_light(x, y, z);
+            for (const Block_pos &i : updated_brightness_blocks) {
+                update_shown(i, exposed(i), true);
+                updated_vbos.insert(get_sector(i.x, i.z));
+            }
+            updated_vbos.insert(get_sector(x, z));
+            for (int i = 0, dx, dz; i < 6; ++i) {
+                dx = FACES[i].x, dz = FACES[i].z;
+                updated_vbos.insert(get_sector(x + dx, z + dz));
+            }
+            std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
+            operations.push_back(std::format("block_update {} {} {}", x, y, z));
+            for (const Sector_pos &i : updated_vbos) {
+                operations.push_back(std::format("update_vbo_data {} {}", i.x, i.y));
             }
         }
     }
 
-    void set_shown(int x, int y, int z, ull shown)
-    {
-        // 不加锁，调用这个函数一定要在外面加锁(world_mutex)
-        if (find_block(x, y, z)->shown == shown)
-            return;
-        find_block(x, y, z)->shown = shown;
-        update_shown(x, y, z, shown);
-    }
-
-    void lock_world_mutex()
-    {
+    inline void lock_world_mutex() {
         world_mutex.lock();
     }
 
-    void unlock_world_mutex()
-    {
+    inline void unlock_world_mutex() {
         world_mutex.unlock();
     }
 
-    void generate_sector(int dx, int dy)
-    {
-        Sector* sector = new Sector;
-        bitset<16 * 256 * 16> hole = holes[{dx, dy}];
-        holes.erase({dx, dy});
-        //                                     整体高度        地形起伏         植被（树）密度      雨量
-        // inline unsigned int get_biome(float altitude, float fluctuate, float tree_density, float rain)
-        float* noise_altitude = new float[16 * 16];
-        float* noise_fluctuate = new float[16 * 16];
-        float* noise_terrain = new float[16 * 16];
-        float* noise_tree_density = new float[16 * 16];
-        float* noise_rain = new float[16 * 16];
-        /*float* cave_noise = new float[5 * 33 * 5];
-        float* cave_noise_mix = new float[16 * 256 * 16];    // 差值后的洞穴噪声*/
-        int old_dx = dx, old_dy = dy;
-        dx *= 16, dy *= 16;
-        //float tmp;
-        int height1, height2;
-        noise->GenUniformGrid2D(noise_altitude, dx * 0.05f, dy * 0.05f, 16, 16, 0.05f, 0.05f, seed);
-        noise->GenUniformGrid2D(noise_fluctuate, dx * 0.3f, dy * 0.3f, 16, 16, 0.3f, 0.3f, seed + 1);
-        terrain_noise_generater->GenUniformGrid2D(noise_terrain, dx * 2, dy * 2, 16, 16, 2, 2, seed + 1);
-        noise->GenUniformGrid2D(noise_tree_density, dx * 0.5f, dy * 0.5f, 16, 16, 0.5f, 0.5f, seed + 2);
-        noise->GenUniformGrid2D(noise_rain, dx * 0.1f, dy * 0.1f, 16, 16, 0.1f, 0.1f, seed + 3);
-        //noise->GenUniformGrid3D(cave_noise, dx / 16 * 5 * 4, seed / 1048576, dy / 16 * 5 * 4, 5, 33, 5, 5.0f, 20.0f, 5.0f, seed);    // 洞穴的3D噪声，后期用线性差值处理
-        /*float n000, n001, n010, n011, n100, n101, n110, n111, u, v, w;
-        for (int x = 0, nx, ny, nz; x != 16; ++x)
-            for (int z = 0; z != 16; ++z)
-                for (int y = 0; y < 256; ++y)
-                {
-                    nx = x / 4, ny = y / 4, nz = z / 4;
-                    n000 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4, ny = y / 4, nz = z / 4 + 1;
-                    n001 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4, ny = y / 4 + 1, nz = z / 4;
-                    n010 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4, ny = y / 4 + 1, nz = z / 4 + 1;
-                    n011 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4 + 1, ny = y / 4, nz = z / 4;
-                    n100 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4 + 1, ny = y / 4, nz = z / 4 + 1;
-                    n101 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4 + 1, ny = y / 4 + 1, nz = z / 4;
-                    n110 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    nx = x / 4 + 1, ny = y / 4 + 1, nz = z / 4 + 1;
-                    n111 = cave_noise[(nz * 33 + ny) * 5 + nx];
-                    tmp = 0;
-                    u = (x % 4) / 4.0f;
-                    v = (y % 4) / 4.0f;
-                    w = (z % 4) / 4.0f;
-                    tmp += n000 * (1 - u) * (1 - v) * (1 - w);
-                    tmp += n001 * (1 - u) * (1 - v) * (w);
-                    tmp += n010 * (1 - u) * (v) * (1 - w);
-                    tmp += n011 * (1 - u) * (v) * (w);
-                    tmp += n100 * (u) * (1 - v) * (1 - w);
-                    tmp += n101 * (u) * (1 - v) * (w);
-                    tmp += n110 * (u) * (v) * (1 - w);
-                    tmp += n111 * (u) * (v) * (w);
-                    cave_noise_mix[(x * 16 + z) * 256 + y] = tmp * hole_calc(y);
-                }*/
-        for (int x = 0; x != 16; ++x)
-            for (int z = 0; z != 16; ++z)
-            {
-                height1 = noise_altitude[z * 16 + x] * 40 + 40 + 64 + (noise_terrain[z * 16 + x] + 1) * terrain_fluctuate_calc(noise_fluctuate[z * 16 + x] * 0.5f + 0.5f) + pow((noise_fluctuate[z * 16 + x] + 1) / 2, 2) * 20;
-                height2 = height1 + 5;
-                sector->blocks[(x * 16 + z) * 256].id = 5;    //bedrock
-                for (int y = 1; y < height1; ++y)
-                    if (!hole[(x * 16 + z) * 256 + y])
-                        sector->blocks[(x * 16 + z) * 256 + y].id = 4;    //stone
-                for (int y = height1; y < height2; ++y)
-                    if (!hole[(x * 16 + z) * 256 + y])
-                        sector->blocks[(x * 16 + z) * 256 + y].id = 3;    //dirt
-                if (!hole[(x * 16 + z) * 256 + height2])
-                    sector->blocks[(x * 16 + z) * 256 + height2].id = 2;    //grass_block
-                sector->data[x * 16 + z] = height2;
-                sector->biome[x * 16 + z] = get_biome(noise_altitude[z * 16 + x], noise_fluctuate[z * 16 + x], noise_tree_density[z * 16 + x], noise_rain[z * 16 + x]);
-            }
-        delete[] noise_altitude;
-        delete[] noise_fluctuate;
-        delete[] noise_terrain;
-        delete[] noise_tree_density;
-        delete[] noise_rain;
-        /*delete[] cave_noise;
-        delete[] cave_noise_mix;*/
-        ull shown;
-        // 检查显示的方块，周边区块以及区块边缘的之后检查
-        for (int x = 1; x != 15; ++x)
-            for (int z = 1; z != 15; ++z)
-                for (int y = 0; y != 256; ++y)
-                {
-                    shown = 0ull;
-                    if (sector->blocks[(x * 16 + z) * 256 + y].id != 1)
-                        for (int i = 0, sdx, sdy, sdz; i < 6; ++i)
-                        {
-                            sdx = FACES[i][0], sdy = FACES[i][1], sdz = FACES[i][2];
-                            if (y + sdy < 0 || y + sdy >= 256)
-                                shown |= (1ull << i);
-                            // 同样的透明方块之间的面一个隐藏，一个显示
-                            else if (transparent_blocks.count(sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id) && sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id != sector->blocks[(x * 16 + z) * 256 + y].id)
-                                shown |= (1ull << i);
-                            else if (transparent_blocks.count(sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id) && sector->blocks[((x + sdx) * 16 + z + sdz) * 256 + y + sdy].id == sector->blocks[(x * 16 + z) * 256 + y].id && (sdx == 1 || sdy == 1 || sdz == 1))
-                                shown |= (1ull << i);
-                        }
-                    if (shown != 0ull)
-                    {
-                        sector->blocks[(x * 16 + z) * 256 + y].shown = shown;
-                        ull mask;
-                        unsigned short id = sector->blocks[(x * 16 + z) * 256 + y].id;
-                        sector->shown[{x, y, z}].second.resize(6);
-                        for (unsigned short i = 0; i != 64; ++i)
-                        {
-                            mask = 1ull << i;
-                            if (shown & mask)
-                            {
-                                vector<float> vertex_texture_data = get_tex_array_data(id, i, x + dx, y, z + dy);
-                                sector->shown[{x, y, z}].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
-                            }
-                        }
-                        sector->shown[{x, y, z}].first = shown;
-                    }
-                }
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        world[{old_dx, old_dy}] = sector;
-        // 区块边缘的方块
-        for (int z = 1; z != 15; ++z)
-            for (int y = 0; y != 256; ++y)
-                set_shown(dx, y, z + dy, exposed(dx, y, z + dy));
-        for (int z = 1; z != 15; ++z)
-            for (int y = 0; y != 256; ++y)
-                set_shown(15 + dx, y, z + dy, exposed(15 + dx, y, z + dy));
-        for (int x = 0; x != 16; ++x)
-            for (int y = 0; y != 256; ++y)
-                set_shown(x + dx, y, dy, exposed(x + dx, y, dy));
-        for (int x = 0; x != 16; ++x)
-            for (int y = 0; y != 256; ++y)
-                set_shown(x + dx, y, 15 + dy, exposed(x + dx, y, 15 + dy));
-        // 周围区块边缘的方块
-        if (world.count({old_dx + 1, old_dy}))
-            for (int z = 0; z != 16; ++z)
-                for (int y = 0; y != 256; ++y)
-                    set_shown(16 + dx, y, z + dy, exposed(16 + dx, y, z + dy));
-        if (world.count({old_dx, old_dy + 1}))
-            for (int x = 0; x != 16; ++x)
-                for (int y = 0; y != 256; ++y)
-                    set_shown(x + dx, y, 16 + dy, exposed(x + dx, y, 16 + dy));
-        if (world.count({old_dx - 1, old_dy}))
-            for (int z = 0; z != 16; ++z)
-                for (int y = 0; y != 256; ++y)
-                    set_shown(-1 + dx, y, z + dy, exposed(-1 + dx, y, z + dy));
-        if (world.count({old_dx, old_dy - 1}))
-            for (int x = 0; x != 16; ++x)
-                for (int y = 0; y != 256; ++y)
-                    set_shown(x + dx, y, -1 + dy, exposed(x + dx, y, -1 + dy));
-        lock_guard<recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy));
-        if (world.count({old_dx + 1, old_dy}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx + 1, old_dy));
-        if (world.count({old_dx, old_dy + 1}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy + 1));
-        if (world.count({old_dx - 1, old_dy}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx - 1, old_dy));
-        if (world.count({old_dx, old_dy - 1}))
-            operations.push_back(format("update_vbo_data {} {}", old_dx, old_dy - 1));
-    }
-
-    bool has_tree(int x, int z, float tree_calc_value)
-    {
-        float hash = hash2D(x, z, seed);
-        if (hash <= 1.0f - tree_calc_value)
-            return false;
-        for (int dx = -3; dx <= 3; ++dx)
-            for (int dz = -3; dz <= 3; ++dz)
-            {
-                if (dx == 0 && dz == 0)
-                    continue;
-                if (dx * dx + dz * dz <= 9 && hash2D(x + dx, z + dz, seed) >= hash)
-                    return false;
-            }
-        return true;
-    }
-
-    void decorate_sector(int sx, int sy)
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        Sector* sector = world[{sx, sy}];
-        Block* block;
-        unsigned int tmp;
-        float tree_density;
-        for (int x = 0, y; x != 16; ++x)
-            for (int z = 0; z != 16; ++z)
-            {
-                y = sector->data[x * 16 + z];
-                tmp = sector->biome[x * 16 + z];
-                switch(tmp)
-                {
-                    case 0u:    // plain
-                        tree_density = 0.0015f;
-                        break;
-                    case 1u:    // mountain
-                        tree_density = 0.005f;
-                        break;
-                    case 2u:    // forest
-                        tree_density = 0.03f;
-                        break;
-                    case 3u:    // highland
-                        tree_density = 0.0005f;
-                        break;
-                    default:
-                        tree_density = 0;
-                }
-                if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[(x * 16 + z) * 256 + y].id != 1)
-                {
-                    for (int dy = 1; dy < 6; ++dy)
-                    {
-                        block = find_block(sx * 16 + x, y + dy, sy * 16 + z);
-                        if (block->id != 1)
-                            continue;
-                        block->id = 6;
-                        block->shown = 0;
-                    }
-                    for (int dx = -2; dx <= 2; ++dx)
-                        for (int dz = -2; dz <= 2; ++dz)
-                            for (int dy = 3; dy <= 4; ++dy)
-                            {
-                                block = find_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz);
-                                if (block->id != 1)
-                                    continue;
-                                block->id = 7;
-                                block->shown = 0;
-                            }
-                    for (int dx = -1, dy = 5; dx <= 1; ++dx)
-                        for (int dz = -1; dz <= 1; ++dz)
-                        {
-                            block = find_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz);
-                            if (block->id != 1)
-                                continue;
-                            block->id = 7;
-                            block->shown = 0;
-                        }
-                    for (int dx = -1, dy = 6; dx <= 1; ++dx)
-                        for (int dz = -1; dz <= 1; ++dz)
-                        {
-                            if (abs(dx) + abs(dz) >= 2)
-                                continue;
-                            block = find_block(sx * 16 + x + dx, y + dy, sy * 16 + z + dz);
-                            if (block->id != 1)
-                                continue;
-                            block->id = 7;
-                            block->shown = 0;
-                        }
-                    for (int dx = -5; dx <= 5; ++dx)
-                        for (int dz = -5; dz <= 5; ++dz)
-                            for (int dy = -1; dy <= 9; ++dy)
-                                set_shown(sx * 16 + x + dx, y + dy, sy * 16 + z + dz, exposed(sx * 16 + x + dx, y + dy, sy * 16 + z + dz));
-                }
-            }
-        lock_guard<recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(format("update_vbo_data {} {}", sx, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx + 1, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx, sy + 1));
-        operations.push_back(format("update_vbo_data {} {}", sx - 1, sy));
-        operations.push_back(format("update_vbo_data {} {}", sx, sy - 1));
-    }
-
-    // 洞穴最大长度：64, 每次以玩家为圆心，simulate_distance + 5为半径，在圆上每个区块（随机高度）生成洞穴。
-    void generate_holes(float x, float y, float z)
-    {
-        //LCG rng((unsigned int)((hash2D(x, y) + hash2D(y, z) + hash2D(z, x)) * 1431655765));    // (2 ^ 32 - 1) / 3
-        float dx[64], dy[64], dz[64], size[64];
-        int length = (hash2D(x, y, seed) + hash2D(y, z, seed) + hash2D(z, x, seed)) * 64 / 6 + 32;    // [32, 64]
-        noise->GenUniformGrid2D(dx, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed);
-        noise->GenUniformGrid2D(dy, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 1);
-        noise->GenUniformGrid2D(dz, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 3.0f, seed + 2);
-        noise->GenUniformGrid2D(size, ((int)x ^ (int)y ^ (int)z), 0, length, 1, 2.0f, 2.0f, seed + 3);
-        vector<float> tmp;
-        for (int i = 0, size_int, x_int, y_int, z_int, final_x, final_y, final_z, sector_x, sector_y; i < length; ++i)
-        {
-            tmp = normalize(dx[i], dy[i] * 0.5, dz[i]);
-            x += tmp[0], y += tmp[1], z += tmp[2];
-            x_int = x, y_int = y, z_int = z;
-            size_int = (int)(size[i] + 3);
-            for (int bx = -size_int; bx <= size_int; ++bx)
-                for (int by = -size_int; by <= size_int; ++by)
-                    for (int bz = -size_int; bz <= size_int; ++bz)
-                        if (bx * bx + by * by + bz * bz <= size_int * size_int)
-                        {
-                            final_x = x_int + bx, final_y = y_int + by, final_z = z_int + bz;
-                            if (final_y <= 0 || final_y >= 256)
-                                break;
-                            sector_x = (final_x >= 0) ? (final_x / 16) : ((final_x - 15) / 16);
-                            sector_y = (final_z >= 0) ? (final_z / 16) : ((final_z - 15) / 16);
-                            final_x = (final_x % 16 + 16) % 16;
-                            final_z = (final_z % 16 + 16) % 16;
-                            holes[{sector_x, sector_y}][(final_x * 16 + final_z) * 256 + final_y] = true;
-                        }
-        }
-    }
-
-    void process_sector_thread()
-    {
-        unordered_set<Sector_pos, Sector_pos_hash> ought_shown, show, hide;
-        list<tuple<string, int, int, int>> operations_local;
-        while (!stoped_threads)
-        {
-            int x, z;
-            {
-                lock_guard<recursive_mutex> lock_position(position_mutex);
-                x = position.x, z = position.z;
-            }
-            int nx = (x >= 0) ? (x / 16) : ((x - 15) / 16);
-            int ny = (z >= 0) ? (z / 16) : ((z - 15) / 16);
-            Sector_pos player_sector = {nx, ny}, now;
-            // 生成洞穴
-            for (Sector_pos ds : generate_holes_sectors)
-            {
-                now = player_sector + ds;
-                if (!generated_holes.count(now))
-                {
-                    generated_holes.insert(now);
-                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 16, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
-                    generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 48, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
-                }
-            }
-            // 生成区块
-            for (Sector_pos ds : simulate_sectors)
-            {
-                now = player_sector + ds;
-                if (!generated_sectors.count(now))
-                {
-                    generated_sectors.insert(now);
-                    shown_sectors.insert(now);
-                    generate_sector(now.x, now.y);
-                }
-            }
-            // 装饰区块
-            for (Sector_pos ds : decorate_sectors)
-            {
-                now = player_sector + ds;
-                if (!decorated_sectors.count(now))
-                {
-                    decorated_sectors.insert(now);
-                    decorate_sector(now.x, now.y);
-                }
-            }
-            this_thread::sleep_for(chrono::milliseconds(300));
-        }
-        ++stoped_threads;
-    }
-
-    void start_process_sector_thread()
-    {
-        thread t(&World::process_sector_thread, this);
+    void start_process_sector_thread() {
+        std::thread t(&World::process_sector_thread, this);
         t.detach();
     }
 
-    string give_operation()
-    {
-        lock_guard<recursive_mutex> lock(operations_mutex);
+    std::string give_operation() {
+        std::lock_guard<std::recursive_mutex> lock(operations_mutex);
         if (operations.empty())
             return "None";
-        string ret = operations.front();
+        std::string res = operations.front();
         operations.pop_front();
-        return ret;
+        return res;
     }
 
-    int get_block(int x, int y, int z) const
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
+    int get_block(int x, int y, int z) const {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
         return find_block(x, y, z)->id;
     }
 
-    ull get_shown(int x, int y, int z) const
-    {
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        return find_block(x, y, z)->shown;
-    }
-
-    void add_transparent_block(string name)
-    {
-        transparent_blocks.insert(id_block.at(name));
-    }
-
-    void add_block_entity_box(string name, double minx, double maxx, double miny, double maxy, double minz, double maxz)
-    {
-        block_entity_boxes[name].insert({minx, maxx, miny, maxy, minz, maxz});
-    }
-
-    void set_block_entity_box_to_none(string name)
-    {
-        block_entity_boxes[name] = set<entity_box>();
-    }
-
-    void add_entity_entity_box(string name, double minx, double maxx, double miny, double maxy, double minz, double maxz)
-    {
-        entity_entity_boxes[name].insert({minx, maxx, miny, maxy, minz, maxz});
-    }
-
-    bool intersect(string entity, double x, double y, double z) const    // 如果与方块碰撞，返回true
-    {
+    bool intersect(int entity, double x, double y, double z) const {
+        /* 如果与方块碰撞，返回true */
         int ix = x, iy = y, iz = z;
         int nx, ny, nz;
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        for (int dx = -2; dx <= 2; ++dx)
-            for (int dy = -2; dy <= 3; ++dy)
-                for (int dz = -2; dz <= 2; ++dz)
-                {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        for (int dx = -2; dx <= 2; ++dx) {
+            for (int dy = -2; dy <= 3; ++dy) {
+                for (int dz = -2; dz <= 2; ++dz) {
                     nx = ix + dx, ny = iy + dy, nz = iz + dz;
                     if (ny >= 256 || ny < 0)
                         continue;
-                    for (entity_box i : entity_entity_boxes.at(entity))
-                        for (entity_box j : block_entity_boxes.at(block_id[find_block(nx, ny, nz)->id]))
+                    for (entity_box i : entity_entity_boxes[entity])
+                        for (entity_box j : block_entity_boxes[find_block(nx, ny, nz)->id])
                             if (AABB(i, j, {x, y, z}, {(double)nx, (double)ny, (double)nz}))
                                 return true;
                 }
+            }
+        }
         return false;
     }
 
-    pybind11::tuple hit_test(double x, double y, double z, double dx, double dy, double dz, double max_distance) const
-    {
-        int m = 16;    // 精度
+    pybind11::tuple hit_test(double x, double y, double z, double dx, double dy, double dz, double max_distance) const {
+        int m = 16;  // 精度
         int px = x, py = y, pz = z;
-        lock_guard<recursive_mutex> lock_world(world_mutex);
-        for (int i = 0, kx, ky, kz; i < max_distance * m; ++i)
-        {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        for (int i = 0, kx, ky, kz; i < max_distance * m; ++i) {
             kx = round(x), ky = round(y), kz = round(z);
-            if (ky < 0 || ky >= 256)
-            {
+            if (ky < 0 || ky >= 256) {
                 x = x + dx / m, y = y + dy / m, z = z + dz / m;
                 continue;
             }
@@ -1001,36 +1081,31 @@ struct World
         return pybind11::make_tuple(pybind11::none(), pybind11::none());
     }
 
-    pybind11::tuple get_sector_vbo_data_ptr(int x, int y) const
-    {
+    pybind11::tuple get_sector_vbo_data_ptr(int x, int y) const {
         // 第一个是指针，第二个是长度
-        return pybind11::make_tuple(reinterpret_cast<uintptr_t>(world.at({x, y})->vertex_data_struct.data.data()), world.at({x, y})->vertex_data_struct.data.size());
+        return pybind11::make_tuple(reinterpret_cast<uintptr_t>(world.at({x, y})->vertex_data_struct.get_data_ptr(0)), world.at({x, y})->vertex_data_struct.size());
+    }
+
+    inline int get_brightness(int x, int y, int z) {
+        return find_block(x, y, z)->light;
     }
 };
 
-PYBIND11_MODULE(MCworld, m)
-{
-    using namespace pybind11::literals; // 引入 _a 字面量，让代码更可读
+PYBIND11_MODULE(MCworld, m) {
+    using namespace pybind11::literals;  // 引入 _a 字面量，让代码更可读
     pybind11::class_<World>(m, "World")
         .def(pybind11::init<int, int>())
         .def("start_process_sector_thread", &World::start_process_sector_thread, pybind11::call_guard<pybind11::gil_scoped_release>())
         .def("give_operation", &World::give_operation)
         .def("get_block", &World::get_block)
-        .def("get_shown", &World::get_shown)
-        .def("add_block", &World::add_block,
-             "x"_a, "y"_a, "z"_a, "sid"_a, "auto_process"_a=true, "has_NBT"_a=false, pybind11::arg("NBT") = emptyNBT)
-        .def("remove_block", &World::remove_block,
-             "x"_a, "y"_a, "z"_a, "auto_process"_a=true)
-        .def("add_transparent_block", &World::add_transparent_block)
-        .def("add_block_entity_box", &World::add_block_entity_box)
-        .def("set_block_entity_box_to_none", &World::set_block_entity_box_to_none)
-        .def("add_entity_entity_box", &World::add_entity_entity_box)
+        .def("add_block", &World::add_block, "x"_a, "y"_a, "z"_a, "id"_a, "auto_process"_a = true, "has_NBT"_a = false, pybind11::arg("NBT") = emptyNBT)
+        .def("remove_block", &World::remove_block, "x"_a, "y"_a, "z"_a, "auto_process"_a = true)
         .def("intersect", &World::intersect)
         .def("hit_test", &World::hit_test)
         .def("set_position", &World::set_position)
         .def("add_operation", &World::add_operation)
         .def("get_sector_vbo_data_ptr", &World::get_sector_vbo_data_ptr)
-        .def("generate_sector", &World::generate_sector)
         .def("lock_world_mutex", &World::lock_world_mutex)
-        .def("unlock_world_mutex", &World::unlock_world_mutex);
+        .def("unlock_world_mutex", &World::unlock_world_mutex)
+        .def("get_brightness", &World::get_brightness);
 }

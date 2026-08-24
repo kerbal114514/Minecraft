@@ -7,14 +7,16 @@ images = [
     "oak_log_top.png",        # 5
     "oak_log_side.png",       # 6
     "oak_leaves.png",         # 7
+    "glowstone.png",          # 8
 ]
 textures = {
-    'block.minecraft.nature.grass_block': (0, 2, 1, 1, 1, 1),
-    'block.minecraft.nature.dirt': (2, 2, 2, 2, 2, 2),
-    'block.minecraft.nature.bedrock': (3, 3, 3, 3, 3, 3),
-    'block.minecraft.nature.stone': (4, 4, 4, 4, 4, 4),
-    'block.minecraft.wood.oak_log': (5, 5, 6, 6, 6, 6),
-    'block.minecraft.leaves.oak_leaves': (7, 7, 7, 7, 7, 7),
+    'block.minecraft.nature.grass_block':     (0, 2, 1, 1, 1, 1),
+    'block.minecraft.nature.dirt':            (2, 2, 2, 2, 2, 2),
+    'block.minecraft.nature.bedrock':         (3, 3, 3, 3, 3, 3),
+    'block.minecraft.nature.stone':           (4, 4, 4, 4, 4, 4),
+    'block.minecraft.wood.oak_log':           (5, 5, 6, 6, 6, 6),
+    'block.minecraft.leaves.oak_leaves':      (7, 7, 7, 7, 7, 7),
+    'block.minecraft.nature.glowstone':       (8, 8, 8, 8, 8, 8),
 }
 def cube_vertices(x, y, z, n):
     """ Return the vertices of the cube at position x, y, z with size 2*n.
@@ -35,7 +37,7 @@ from pyglet.window import key, mouse
 import ctypes, math
 from PIL import Image
 
-block_id = 'block.minecraft.leaves.oak_leaves'
+block_id = 'block.minecraft.nature.glowstone'
 texture_ids = []
 vertices = cube_vertices(0, 0, 0, 0.5)
 
@@ -88,5 +90,5 @@ def on_draw():
             if (not any(p[:3])):
                 p = (255, 255, 255, 0)
             im.putpixel((x, y), p)
-    im.save('item.minecraft.block_item.leaves.oak_leaves.png')
+    im.save('item.minecraft.block_item.nature.glowstone.png')
 pyglet.app.run()

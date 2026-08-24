@@ -1,0 +1,8 @@
+CompileFlags:
+  Add:
+    - -IFastNoise2/build/_deps/fastsimd-src/include
+    - -IFastNoise2/include
+    - -I/mnt/e/CPinecraft/.venv/lib/python3.13/site-packages/pybind11/include
+    - -I/mnt/e/CPinecraft/.venv/include
+    - -I/usr/include/python3.13
+    - -std=c++20
