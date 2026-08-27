@@ -54,7 +54,7 @@ gamerule = {
 
 settings = {
     "gui_size": 2,
-    "simulate_distance": 4,
+    "simulate_distance": 16,
 }
 
 def cube_vertices(x, y, z, n):
@@ -159,7 +159,7 @@ def get_tex_array_data(block_name, face_index):
 
 
 class Shader:
-    def __init__(self, vert_code, frag_code):
+    def __init__(self, vert_code, frag_code, *uniform_args):
         self.program = glCreateProgram()
 
         # 编译顶点着色器
@@ -182,6 +182,9 @@ class Shader:
             print("Shader Link Error:")
             print(log.value.decode())
             raise RuntimeError("Shader linking failed.")
+        self.uniform_args_loc = {}
+        for i in uniform_args:
+            self.uniform_args_loc[i] = glGetUniformLocation(self.program, bytes(i, encoding="ascii"))
 
     def compile_shader(self, code, shader_type):
         shader = glCreateShader(shader_type)
@@ -202,49 +205,21 @@ class Shader:
             raise RuntimeError(f"{shader_name} compilation failed")
         return shader
 
-    def bind(self):
+    def bind(self, **uniform_args):
         glUseProgram(self.program)
-
+        for key in uniform_args:
+            word = uniform_args[key]
+            if len(word) == 1:
+                glUniform1f(self.uniform_args_loc[key], *word)
+            elif len(word) == 2:
+                glUniform1f(self.uniform_args_loc[key], *word)
+            elif len(word) == 3:
+                glUniform3f(self.uniform_args_loc[key], *word)
+            elif len(word) == 4:
+                glUniform4f(self.uniform_args_loc[key], *word)
 
     def unbind(self):
         glUseProgram(0)
-
-class BlockShader(Shader):
-    def __init__(self, vert_code, frag_code):
-        self.program = glCreateProgram()
-
-        # 编译顶点着色器
-        self.vs = self.compile_shader(vert_code, GL_VERTEX_SHADER)
-        # 编译片段着色器
-        self.fs = self.compile_shader(frag_code, GL_FRAGMENT_SHADER)
-
-        glAttachShader(self.program, self.vs)
-        glAttachShader(self.program, self.fs)
-        glBindAttribLocation(self.program, 0, b"a_pos")
-        glBindAttribLocation(self.program, 1, b"a_tex_coords")
-        glBindAttribLocation(self.program, 2, b"a_compressed")
-        glLinkProgram(self.program)
-
-        status = GLint()
-        glGetProgramiv(self.program, GL_LINK_STATUS, ctypes.byref(status))
-        if not status.value:
-            # 如果链接失败，获取错误日志
-            log_length = GLint()
-            glGetProgramiv(self.program, GL_INFO_LOG_LENGTH, ctypes.byref(log_length))
-            log = ctypes.create_string_buffer(log_length.value)
-            glGetProgramInfoLog(self.program, log_length, None, log)
-            print("Shader Link Error:")
-            print(log.value.decode())
-            raise RuntimeError("Shader linking failed.")
-        self.u_render_distance_loc = glGetUniformLocation(self.program, b"u_render_distance")
-        self.u_position_loc = glGetUniformLocation(self.program, b"u_position")
-        self.u_light_direction_loc = glGetUniformLocation(self.program, b"u_light_direction")
-
-    def bind(self, u_render_distance, u_position, u_light_direction):
-        super().bind()
-        glUniform1f(self.u_render_distance_loc, u_render_distance)
-        glUniform3f(self.u_position_loc, *u_position)
-        glUniform3f(self.u_light_direction_loc, *u_light_direction)
 
 
 FACES = (
@@ -373,7 +348,7 @@ class Window(pyglet.window.Window):
         # right, and 0 otherwise.
         # 按键
         self.strafe = [0, 0]
-        self.position = (0, 258, 0)
+        self.position = (0, 180, 0)
         self.flying = False
         self.delta = [0, 0, 0]
         # First element is rotation of the player in the x-z plane (ground
@@ -386,17 +361,25 @@ class Window(pyglet.window.Window):
         self.rotation = (0, 0)
         # 准星
         self.reticle = None
-        self.escape_menu_shade = None
+        self.escape_menu_shadow = None
+        self.loading_shadow = None
         self.inventory_gui = None
         self.render_distance = simulate_distance
-        self.world = World(random.randint(0, 2 ** 31 - 5), self.render_distance)
+        seed = -1
+        for i in range(len(sys.argv)):
+            if sys.argv[i] == "--seed":
+                seed = int(sys.argv[i + 1])
+        if seed == -1:
+            seed = random.randint(0, 2 ** 31 - 5)
+        print("seed:", seed)
+        self.world = World(seed, self.render_distance)
         # 按键
         self.space = False
         self.last_space_press = -1
         self.shift = False
         self.control = False
         # 决定渲染哪些东西
-        self.level = "escape_menu"
+        self.level = "loading_world"
         # 所有按钮
         self.mouse_position = (-1, -1)
         gs = settings["gui_size"]
@@ -410,15 +393,15 @@ class Window(pyglet.window.Window):
             "escape_menu.save_and_return": (0, -15),
         }
         # 着色器
-        self.block_shader = BlockShader(block_vertex_shader_code, block_fragment_shader_code)
-        self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code)
+        self.block_shader = Shader(block_vertex_shader_code, block_fragment_shader_code, "u_render_distance", "u_position", "u_light_direction", "u_player_sky_light")
+        self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code, "u_player_sky_light")
         # VBO id
         self.vbo_id = {}
         self.vao_id = {}
         self.vbo_size = {}
         self.vbo_reserve_size = {}
         # 函数字典
-        self.functions = {"block_update": self.block_update, "update_vbo_data": self.update_vbo_data}
+        self.functions = {"block_update": self.block_update, "update_vbo_data": self.update_vbo_data, "set_schedule": self.set_schedule, "init_done": self.init_done}
         # 生成天空盒顶点数据
         vertex = []
         x, y, z = 0, 0, 0
@@ -441,12 +424,20 @@ class Window(pyglet.window.Window):
         self.inventory[0][6] = "item.minecraft.glowstone"
         self.activated_inventory_id = 1
         self.world.set_position(*self.position)
+        # 上一次渲染时的 player_sky_light 值
+        self.last_player_sky_light = 0
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
         # 随机刻
         pyglet.clock.schedule_interval(self.process_random_tick, 1 / gamerule["tick_per_second"])
+
+    def set_schedule(self, sort: str, nowcnt: int, allcnt: int):
+        print(f"{sort}: {nowcnt} of {allcnt}, {int(round(nowcnt / allcnt * 100))}%", end="             \r")
+
+    def init_done(self):
         # 创建处理区块的线程
         self.world.start_process_sector_thread()
+        self.resume_game()
 
     def resume_game(self):
         self.set_exclusive_mouse(True)
@@ -578,8 +569,12 @@ class Window(pyglet.window.Window):
             if operation == "None":
                 break
             operation = operation.split(" ")
-            for i in range(1, len(operation)):
-                operation[i] = int(operation[i])
+            if operation[0] == "set_schedule":
+                operation[2] = int(operation[2])
+                operation[3] = int(operation[3])
+            else:
+                for i in range(1, len(operation)):
+                    operation[i] = int(operation[i])
             self.functions[operation[0]](*operation[1:])
 
     def update(self, dt):
@@ -798,12 +793,7 @@ class Window(pyglet.window.Window):
             print(self.position, self.delta)
         elif symbol == key.L:
             x, y, z = self.position
-            y += 1.2
-            if self.shift and not self.flying:
-                y -= 0.5
-            block = self.world.hit_test(x, y, z, *self.get_sight_vector(), 5)[0]
-            if block:
-                print(self.world.get_brightness(*block))
+            print(self.world.get_brightness(int(round(x)), int(round(y)), int(round(z))))
         elif symbol == key._1:
             self.activated_inventory_id = 1
         elif symbol == key._2:
@@ -873,11 +863,17 @@ class Window(pyglet.window.Window):
             ("v2i", (x - n, y, x + n, y, x, y - n, x, y + n)),
             ("c4B", (100, 100, 100, 255) * 4)
         )
-        if self.escape_menu_shade:
-            self.escape_menu_shade.delete()
-        self.escape_menu_shade = pyglet.graphics.vertex_list(4,
+        if self.escape_menu_shadow:
+            self.escape_menu_shadow.delete()
+        self.escape_menu_shadow = pyglet.graphics.vertex_list(4,
             ("v2i", (0, 0, width, 0, width, height, 0, height)),
             ("c4B", (0, 0, 0, 128) * 4)
+        )
+        if self.loading_shadow:
+            self.loading_shadow.delete()
+        self.loading_shadow = pyglet.graphics.vertex_list(4,
+            ("v2i", (0, 0, width, 0, width, height, 0, height)),
+            ("c4B", (0, 0, 0, 255) * 4)
         )
         if self.inventory_gui:
             self.inventory_gui.delete()
@@ -932,14 +928,23 @@ class Window(pyglet.window.Window):
         """
         self.clear()
         self.set_3d()
-        # 绘制天空
-        glDepthMask(GL_FALSE)
-        self.draw_sky()
-        glDepthMask(GL_TRUE)
         x, y, z = self.position
         y += 1.2
         if self.shift and not self.flying:
             y -= 0.5
+        # 计算玩家所在方块的天空光照
+        if int(round(y)) >= 256 or self.world.get_max_height(int(round(x)), int(round(z))) - int(round(y)) < 5:
+            player_sky_light = 1.0
+        else:
+            player_sky_light = self.world.get_brightness(int(round(x)), int(round(y)), int(round(z))) // 16 / 15
+        new_player_sky_light = player_sky_light * 0.05 + self.last_player_sky_light * 0.95
+        if abs(new_player_sky_light - player_sky_light) > 0.001:
+            player_sky_light = new_player_sky_light
+        self.last_player_sky_light = player_sky_light
+        # 绘制天空
+        glDepthMask(GL_FALSE)
+        self.draw_sky(player_sky_light)
+        glDepthMask(GL_TRUE)
         glTranslatef(-x, -y, -z)
         sector = (int(self.position[0]) // 16, int(self.position[2]) // 16)
         x, y = 45, 60
@@ -961,7 +966,7 @@ class Window(pyglet.window.Window):
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
-        self.block_shader.bind(self.render_distance * 16 - 16, self.position, (dx * tmp, dy * tmp, dz * tmp))
+        self.block_shader.bind(u_render_distance=(float(self.render_distance * 16 - 16), ), u_position=self.position, u_light_direction=(dx * tmp, dy * tmp, dz * tmp), u_player_sky_light=(player_sky_light, ))
         glDepthFunc(GL_LEQUAL)
         for key in self.vao_id:
             if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
@@ -1003,7 +1008,9 @@ class Window(pyglet.window.Window):
         glDisable(GL_TEXTURE_2D)
         self.reticle.draw(GL_LINES)
         if self.level == "escape_menu":
-            self.escape_menu_shade.draw(GL_QUADS)
+            self.escape_menu_shadow.draw(GL_QUADS)
+        elif self.level == "loading_world":
+            self.loading_shadow.draw(GL_QUADS)
         for key in self.buttons:
             origin_key = key
             key = key.split(".")
@@ -1033,11 +1040,11 @@ class Window(pyglet.window.Window):
             for i in vertex_data:
                 pyglet.graphics.draw(4, GL_LINE_LOOP, ("v3f", i))
 
-    def draw_sky(self):
+    def draw_sky(self, player_sky_light):
         """ 绘制天空盒
 
         """
-        self.skybox_shader.bind()
+        self.skybox_shader.bind(u_player_sky_light=(player_sky_light, ))
         self.sky_box.draw(GL_QUADS)
         self.skybox_shader.unbind()
 
