@@ -197,7 +197,7 @@ struct Sector {
     GL_QUADS_vbo_data vertex_data_struct;
     // 区块内方块坐标的index值(get_block_index)  之前的渲染状态
     // vector:面的id为索引，内容是VBO内的ID
-    std::unordered_map<int, std::pair<uint64_t, std::vector<uint32_t>>> shown;
+    std::array<std::pair<uint64_t, std::vector<uint32_t>>, 16 * 256 * 16> shown;
 };
 
 constexpr std::array<uint16_t, 6> textures[] = {{0, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 0}, {0, 2, 1, 1, 1, 1}, {2, 2, 2, 2, 2, 2}, {4, 4, 4, 4, 4, 4},
@@ -703,10 +703,10 @@ private:
                 mask = 1ull << i;
                 if (shown & mask) {
                     get_tex_array_data_without_hash(x, y, z, id, i, vertex_texture_data);
-                    sector->shown.at(index).second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                    sector->shown[index].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
                 }
             }
-            sector->shown.at(index).first = shown;
+            sector->shown[index].first = shown;
         };
         for (int x = 0; x < 16; ++x) {
             for (int z = 0; z < 16; ++z) {
@@ -721,30 +721,22 @@ private:
             uint16_t id = find_block_without_hash({x, y, z})->id;
             int index = get_block_index(x, y, z);
             uint16_t change_width;
-            if (!sector->shown.count(index)) {
-                change_width = std::bit_width(shown);
-                sector->shown[index].second.resize(change_width);
-            } else {
-                change_width = std::bit_width(shown ^ sector->shown.at(index).first);
-                sector->shown.at(index).second.resize(std::max(std::bit_width(sector->shown.at(index).first), std::bit_width(shown)));
-            }
+            change_width = std::bit_width(shown ^ sector->shown[index].first);
+            sector->shown[index].second.resize(std::max(std::bit_width(sector->shown[index].first), std::bit_width(shown)));
             std::array<float, 4 * 7> vertex_texture_data;
             for (uint16_t i = 0; i != change_width; ++i) {
                 mask = 1ull << i;
-                if ((shown & mask) != (sector->shown.at(index).first & mask)) {
+                if ((shown & mask) != (sector->shown[index].first & mask)) {
                     if (shown & mask) {
                         get_tex_array_data_without_hash(x, y, z, id, i, vertex_texture_data);
-                        sector->shown.at(index).second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                        sector->shown[index].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
                     } else {
-                        sector->vertex_data_struct.erase(sector->shown.at(index).second[i]);
+                        sector->vertex_data_struct.erase(sector->shown[index].second[i]);
                     }
                 }
             }
-            sector->shown.at(index).first = shown;
-            if (shown)
-                sector->shown.at(index).second.resize(std::bit_width(shown));
-            else
-                sector->shown.erase(index);
+            sector->shown[index].first = shown;
+            sector->shown[index].second.resize(std::bit_width(shown));
         };
         if (sector01 != nullptr) {
             for (int x = 0; x < 16; ++x) {
@@ -897,7 +889,7 @@ private:
                 for (int z = 0; z < 16; ++z) {
                     for (int y = 0; y <= sector->data[x * 16 + z]; ++y) {
                         updated = calc_light(x + dx, y, z + dy);
-                        for (Block_pos i : updated) {
+                        for (const Block_pos& i : updated) {
                             if (get_sector(i) != p) {
                                 update_shown(i, exposed(i));
                                 update_shown(i, exposed(i), true);
@@ -911,7 +903,6 @@ private:
 
     void check_neighbors(int x, int y, int z) {
         Block_pos p = {x, y, z};
-        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
         for (int i = 0; i < 6; ++i) {
             update_shown(p + FACES[i], exposed(p + FACES[i]));
         }
@@ -924,16 +915,10 @@ private:
             return;
         Sector *sector = world.at(sector_pos);
         uint64_t mask;
-        uint16_t id = find_block(x, y, z)->id;
         int index = get_block_index(x, y, z);
         uint16_t change_width;
-        if (!sector->shown.count(index)) {
-            change_width = std::bit_width(shown);
-            sector->shown[index].second.resize(change_width);
-        } else {
-            change_width = std::bit_width(shown ^ sector->shown.at(index).first);
-            sector->shown.at(index).second.resize(std::max(std::bit_width(sector->shown.at(index).first), std::bit_width(shown)));
-        }
+        change_width = std::bit_width(shown ^ sector->shown[index].first);
+        sector->shown[index].second.resize(std::max(std::bit_width(sector->shown[index].first), std::bit_width(shown)));
         if (force_update) {
             change_width = std::bit_width(shown);
         }
@@ -942,32 +927,28 @@ private:
             mask = 1ull << i;
             if (force_update) {
                 if (shown & mask) {
-                    get_tex_array_data(x, y, z, id, i, vertex_texture_data);
-                    sector->vertex_data_struct.change_data(sector->shown.at(index).second[i], vertex_texture_data);
+                    get_tex_array_data(x, y, z, i, vertex_texture_data);
+                    sector->vertex_data_struct.change_data(sector->shown[index].second[i], vertex_texture_data);
                 }
-            } else if ((shown & mask) != (sector->shown.at(index).first & mask)) {
+            } else if ((shown & mask) != (sector->shown[index].first & mask)) {
                 if (shown & mask) {
-                    get_tex_array_data(x, y, z, id, i, vertex_texture_data);
-                    sector->shown.at(index).second[i] = sector->vertex_data_struct.add(vertex_texture_data);
+                    get_tex_array_data(x, y, z, i, vertex_texture_data);
+                    sector->shown[index].second[i] = sector->vertex_data_struct.add(vertex_texture_data);
                 } else {
-                    sector->vertex_data_struct.erase(sector->shown.at(index).second[i]);
+                    sector->vertex_data_struct.erase(sector->shown[index].second[i]);
                 }
             }
         }
-        sector->shown.at(index).first = shown;
-        if (shown)
-            sector->shown.at(index).second.resize(std::bit_width(shown));
-        else
-            sector->shown.erase(index);
+        sector->shown[index].first = shown;
+        sector->shown[index].second.resize(std::bit_width(shown));
     }
 
     inline void update_shown(const Block_pos &p, uint64_t shown, bool force_update = false) {
         update_shown(p.x, p.y, p.z, shown, force_update);
     }
 
-    void get_tex_array_data(int x, int y, int z, uint32_t id, int face_index, std::array<float, 4 * 7> &res) const {
-        // TODO: 现在generate_sector不会调用这个函数，需要把id这个参数去掉
-        // 不能通过find_block获取id，因为有些时候（比如generate_sector中）find_block会返回Sector_not_loaded
+    void get_tex_array_data(int x, int y, int z, int face_index, std::array<float, 4 * 7> &res) const {
+        uint32_t id = find_block(x, y, z)->id;
         int img_idx = textures[id][face_index];
         std::array<std::array<float, 13>, 6> vertices;
         cube_vertices(x, y, z, 0.5, vertices);

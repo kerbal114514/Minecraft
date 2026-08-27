@@ -6,3 +6,5 @@ build/
 *.pyd
 .DS_Store
 FastNoise2/
+.clangd
+.clang-format

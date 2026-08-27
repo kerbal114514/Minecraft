@@ -54,7 +54,7 @@ gamerule = {
 
 settings = {
     "gui_size": 2,
-    "simulate_distance": 16,
+    "simulate_distance": 8,
 }
 
 def cube_vertices(x, y, z, n):
