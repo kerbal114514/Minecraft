@@ -194,6 +194,7 @@ struct Sector {
     std::unordered_map<Block_pos, std::map<std::string, std::string>, Block_pos_hash> NBTs;
     std::array<int, 16 * 16> data;
     std::array<int, 16 * 16> biome;
+    mutable std::mutex vertex_data_struct_mutex;
     GL_QUADS_vbo_data vertex_data_struct;
     // 区块内方块坐标的index值(get_block_index)  之前的渲染状态
     // vector:面的id为索引，内容是VBO内的ID
@@ -639,6 +640,15 @@ private:
         Sector* sectormm = world.find(p + Sector_pos{-1, -1}) != world.end() ? world.at(p + Sector_pos{-1, -1}) : nullptr;
         Sector* sector1m = world.find(p + Sector_pos{ 1, -1}) != world.end() ? world.at(p + Sector_pos{ 1, -1}) : nullptr;
         Sector* sectorm1 = world.find(p + Sector_pos{-1,  1}) != world.end() ? world.at(p + Sector_pos{-1,  1}) : nullptr;
+        sector->vertex_data_struct_mutex.lock();
+        if (sector01 != nullptr) sector01->vertex_data_struct_mutex.lock();
+        if (sector10 != nullptr) sector10->vertex_data_struct_mutex.lock();
+        if (sector0m != nullptr) sector0m->vertex_data_struct_mutex.lock();
+        if (sectorm0 != nullptr) sectorm0->vertex_data_struct_mutex.lock();
+        if (sector11 != nullptr) sector11->vertex_data_struct_mutex.lock();
+        if (sectormm != nullptr) sectormm->vertex_data_struct_mutex.lock();
+        if (sector1m != nullptr) sector1m->vertex_data_struct_mutex.lock();
+        if (sectorm1 != nullptr) sectorm1->vertex_data_struct_mutex.lock();
         dx *= 16, dy *= 16;
         auto get_sector_without_hash = [p, sector, sector01, sector10, sector0m, sectorm0, sector11, sectormm, sector1m, sectorm1](Block_pos bp) -> Sector* {
             Sector_pos sp = get_sector(bp);
@@ -788,6 +798,15 @@ private:
                 }
             }
         }
+        sector->vertex_data_struct_mutex.unlock();
+        if (sector01 != nullptr) sector01->vertex_data_struct_mutex.unlock();
+        if (sector10 != nullptr) sector10->vertex_data_struct_mutex.unlock();
+        if (sector0m != nullptr) sector0m->vertex_data_struct_mutex.unlock();
+        if (sectorm0 != nullptr) sectorm0->vertex_data_struct_mutex.unlock();
+        if (sector11 != nullptr) sector11->vertex_data_struct_mutex.unlock();
+        if (sectormm != nullptr) sectormm->vertex_data_struct_mutex.unlock();
+        if (sector1m != nullptr) sector1m->vertex_data_struct_mutex.unlock();
+        if (sectorm1 != nullptr) sectorm1->vertex_data_struct_mutex.unlock();
     }
 
     // 洞穴最大长度：64, 每次以玩家为圆心，simulate_distance +
@@ -899,13 +918,13 @@ private:
 
     void calc_sector_light(int dx, int dy) {
         Sector_pos p = {dx, dy};
-        Sector *sector = world.at(p);
-        dx *= 16, dy *= 16;
         // 这里不需要加锁，unordered_map.at操作是线程安全的，
         // 调用calc_sector_light时不会有别的线程访问这个区块(见process_sector_thread)
         std::unordered_set<Sector_pos, Sector_pos_hash>::iterator it;
         if ((it = full_light_calc_flag.find(p)) != full_light_calc_flag.end()) {
             full_light_calc_flag.erase(it);
+            Sector *sector = world.at(p);
+            dx *= 16, dy *= 16;
             std::vector<Block_pos> updated;
             for (int x = 0; x < 16; ++x) {
                 for (int z = 0; z < 16; ++z) {
@@ -945,6 +964,7 @@ private:
             change_width = std::bit_width(shown);
         }
         std::array<float, 4 * 7> vertex_texture_data;
+        std::lock_guard<std::mutex> mtx(sector->vertex_data_struct_mutex);
         for (uint16_t i = 0; i != change_width; ++i) {
             mask = 1ull << i;
             if (force_update) {
@@ -1051,13 +1071,6 @@ public:
                 }
             }
         }
-        for (Sector_pos hole_pos : generate_holes_sectors) {
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 16,
-                           hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
-            generate_holes(hole_pos.x * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 2) * 16, hash2D(hole_pos.x, hole_pos.y, seed) * 24 + 48,
-                           hole_pos.y * 16 + hash2D(hole_pos.x, hole_pos.y, seed + 1) * 16);
-            generated_holes.insert(hole_pos);
-        }
         std::thread t(&World::init_sectors, this);
         t.detach();
     };
@@ -1079,7 +1092,9 @@ public:
     }
 
     void add_block(int x, int y, int z, uint16_t id, bool auto_process = true, bool has_NBT = false, const std::map<std::string, std::string> &NBT = emptyNBT) {
-        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        if (auto_process) {
+            world_mutex.lock();
+        }
         Block *block = find_block(x, y, z);
         if (block->id == 0 || block->id != 1)
             return;
@@ -1121,6 +1136,7 @@ public:
                     updated_vbos.insert(get_sector(i.x, i.z));
                 }
             }
+            world_mutex.unlock();
             updated_vbos.insert(get_sector(x, z));
             for (int i = 0, dx, dz; i < 6; ++i) {
                 dx = FACES[i].x, dz = FACES[i].z;
@@ -1173,12 +1189,14 @@ public:
         }
     }
 
-    inline void lock_world_mutex() {
-        world_mutex.lock();
+    inline void lock_sector_vertex_data_struct_mutex(int x, int y) {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        world.at({x, y})->vertex_data_struct_mutex.lock();
     }
 
-    inline void unlock_world_mutex() {
-        world_mutex.unlock();
+    inline void unlock_sector_vertex_data_struct_mutex(int x, int y) {
+        std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
+        world.at({x, y})->vertex_data_struct_mutex.unlock();
     }
 
     inline void start_process_sector_thread() {
@@ -1272,8 +1290,8 @@ PYBIND11_MODULE(MCworld, m) {
         .def("set_position", &World::set_position)
         .def("add_operation", &World::add_operation)
         .def("get_sector_vbo_data_ptr", &World::get_sector_vbo_data_ptr)
-        .def("lock_world_mutex", &World::lock_world_mutex)
-        .def("unlock_world_mutex", &World::unlock_world_mutex)
+        .def("lock_sector_vertex_data_struct_mutex", &World::lock_sector_vertex_data_struct_mutex)
+        .def("unlock_sector_vertex_data_struct_mutex", &World::unlock_sector_vertex_data_struct_mutex)
         .def("get_brightness", &World::get_brightness)
         .def("get_max_height", &World::get_max_height);
 }

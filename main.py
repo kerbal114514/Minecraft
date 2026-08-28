@@ -470,7 +470,7 @@ class Window(pyglet.window.Window):
             glBindBuffer(GL_ARRAY_BUFFER, 0)
         vbo_id = self.vbo_id[(x, y)]
         glBindBuffer(GL_ARRAY_BUFFER, vbo_id)
-        self.world.lock_world_mutex()
+        self.world.lock_sector_vertex_data_struct_mutex(x, y)
         #print(f"\n\n{(x, y)}\n\n")
         data = self.world.get_sector_vbo_data_ptr(x, y)
         data_ptr = ctypes.cast(data[0], ctypes.POINTER(GLfloat))
@@ -481,7 +481,7 @@ class Window(pyglet.window.Window):
             self.vbo_reserve_size[(x, y)] = int(data[1] * 1.2)
             glBufferData(GL_ARRAY_BUFFER, self.vbo_reserve_size[(x, y)] * ctypes.sizeof(GLfloat), None, GL_DYNAMIC_DRAW)
         glBufferSubData(GL_ARRAY_BUFFER, 0, data[1] * ctypes.sizeof(GLfloat), data_ptr)
-        self.world.unlock_world_mutex()
+        self.world.unlock_sector_vertex_data_struct_mutex(x, y)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         self.vbo_size[(x, y)] = data[1] // 7
 
@@ -1048,7 +1048,7 @@ class Window(pyglet.window.Window):
         self.sky_box.draw(GL_QUADS)
         self.skybox_shader.unbind()
 
-window = Window(width=800, height=600, caption="Minecraft", resizable=True)
+window = Window(width=80, height=60, caption="Minecraft", resizable=True)
 glLineWidth(2.0)
 # 启用Alpha混合
 glEnable(GL_BLEND)
