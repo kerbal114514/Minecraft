@@ -637,6 +637,9 @@ private:
             else return nullptr;
         };
         auto find_block_without_hash = [&get_sector_without_hash](Block_pos bp) {
+            if (bp.y < 0 || bp.y >= 256) {
+                return &sector_not_loaded;
+            }
             Sector *sp = get_sector_without_hash(bp);
             if (sp != nullptr) {
                 return &sp->blocks[get_block_index(bp)];
@@ -678,7 +681,9 @@ private:
                 res[i + 3] = uvs[j];
                 res[i + 4] = uvs[j + 1];
                 res[i + 5] = img_idx;
-                if (transparent_blocks[find_block_without_hash(p)->id] && (!transparent_blocks[find_block_without_hash(p + normals[(int)vertices[face_index][12]])->id])) {
+                if ((p + normals[(int)vertices[face_index][12]]).y == 256) {
+                    light = 15 << 4;
+                } else if (transparent_blocks[find_block_without_hash(p)->id] && (!transparent_blocks[find_block_without_hash(p + normals[(int)vertices[face_index][12]])->id])) {
                     light = find_block_without_hash(p)->light;
                 } else {
                     light = find_block_without_hash(p + normals[(int)vertices[face_index][12]])->light;
@@ -961,7 +966,9 @@ private:
             res[i + 3] = uvs[j];
             res[i + 4] = uvs[j + 1];
             res[i + 5] = img_idx;
-            if (transparent_blocks[find_block(p)->id] && (!transparent_blocks[find_block(p + normals[(int)vertices[face_index][12]])->id])) {
+            if ((p + normals[(int)vertices[face_index][12]]).y == 256) {
+                light = 15 << 4;
+            } else if (transparent_blocks[find_block(p)->id] && (!transparent_blocks[find_block(p + normals[(int)vertices[face_index][12]])->id])) {
                 light = find_block(p)->light;
             } else {
                 light = find_block(p + normals[(int)vertices[face_index][12]])->light;
