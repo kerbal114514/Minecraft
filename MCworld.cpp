@@ -468,49 +468,66 @@ private:
             std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
             world[p] = sector;
         }
-        // 让矿洞中的光跨区块传播
         if (full_light_calc_flag.count(p)) {
             return;
         }
+        // 这里写一个局部的find_block减少unordered_map.at操作的次数
+        Sector* sector01 = world.find(p + Sector_pos{ 0,  1}) != world.end() ? world.at(p + Sector_pos{ 0,  1}) : nullptr;
+        Sector* sector10 = world.find(p + Sector_pos{ 1,  0}) != world.end() ? world.at(p + Sector_pos{ 1,  0}) : nullptr;
+        Sector* sector0m = world.find(p + Sector_pos{ 0, -1}) != world.end() ? world.at(p + Sector_pos{ 0, -1}) : nullptr;
+        Sector* sectorm0 = world.find(p + Sector_pos{-1,  0}) != world.end() ? world.at(p + Sector_pos{-1,  0}) : nullptr;
+        auto get_sector_without_hash = [p, sector, sector01, sector10, sector0m, sectorm0](int x, int z) -> Sector* {
+            Sector_pos sp = get_sector(x, z);
+            if (p == sp) return sector;
+            else if (p + Sector_pos{ 0,  1} == sp) return sector01;
+            else if (p + Sector_pos{ 1,  0} == sp) return sector10;
+            else if (p + Sector_pos{ 0, -1} == sp) return sector0m;
+            else if (p + Sector_pos{-1,  0} == sp) return sectorm0;
+            else return nullptr;
+        };
+        auto find_block_without_hash = [&get_sector_without_hash](int x, int y, int z) {
+            return &get_sector_without_hash(x, z)->blocks[get_block_index(x, y, z)];
+        };
+        // 让矿洞中的光跨区块传播
         Block* block;
-        if (world.count(p + Sector_pos{1, 0})) {
+        if (sector10 != nullptr) {
             for (int z = 0; z != 16; ++z) {
-                for (int y = 0; y != 256; ++y) {
-                    block = find_block(16 + dx, y, z + dy);
-                    if ((block->light & 15) >= 2 || (block->light & 240) >= 32) {
+                for (int y = 0; y <= sector->data[15 * 16 + z]; ++y) {
+                    block = find_block_without_hash(16 + dx, y, z + dy);
+                    if (transparent_blocks[sector->blocks[(15 * 16 + z) * 256 + y].id] && ((block->light & 15) >= 2 || (block->light & 240) >= 32)) {
                         full_light_calc_flag.insert(p);
                         return;
                     }
                 }
             }
         }
-        if (world.count(p + Sector_pos{0, 1})) {
+        if (sector01 != nullptr) {
             for (int x = 0; x != 16; ++x) {
-                for (int y = 0; y != 256; ++y) {
-                    block = find_block(x + dx, y, dy + 16);
-                    if ((block->light & 15) >= 2 || (block->light & 240) >= 32) {
+                for (int y = 0; y <= sector->data[x * 16 + 15]; ++y) {
+                    block = find_block_without_hash(x + dx, y, dy + 16);
+                    if (transparent_blocks[sector->blocks[(x * 16 + 15) * 256 + y].id] && ((block->light & 15) >= 2 || (block->light & 240) >= 32)) {
                         full_light_calc_flag.insert(p);
                         return;
                     }
                 }
             }
         }
-        if (world.count(p + Sector_pos{-1, 0})) {
+        if (sectorm0 != nullptr) {
             for (int z = 0; z != 16; ++z) {
-                for (int y = 0; y != 256; ++y) {
-                    block = find_block(-1 + dx, y, z + dy);
-                    if ((block->light & 15) >= 2 || (block->light & 240) >= 32) {
+                for (int y = 0; y <= sector->data[z]; ++y) {
+                    block = find_block_without_hash(-1 + dx, y, z + dy);
+                    if (transparent_blocks[sector->blocks[z * 256 + y].id] && ((block->light & 15) >= 2 || (block->light & 240) >= 32)) {
                         full_light_calc_flag.insert(p);
                         return;
                     }
                 }
             }
         }
-        if (world.count(p + Sector_pos{0, -1})) {
+        if (sector0m != nullptr) {
             for (int x = 0; x != 16; ++x) {
-                for (int y = 0; y != 256; ++y) {
-                    block = find_block(x + dx, y, dy - 1);
-                    if ((block->light & 15) >= 2 || (block->light & 240) >= 32) {
+                for (int y = 0; y <= sector->data[x * 16]; ++y) {
+                    block = find_block_without_hash(x + dx, y, dy - 1);
+                    if (transparent_blocks[sector->blocks[x * 16 * 256 + y].id] && ((block->light & 15) >= 2 || (block->light & 240) >= 32)) {
                         full_light_calc_flag.insert(p);
                         return;
                     }
