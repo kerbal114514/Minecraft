@@ -1048,7 +1048,7 @@ class Window(pyglet.window.Window):
         self.sky_box.draw(GL_QUADS)
         self.skybox_shader.unbind()
 
-window = Window(width=80, height=60, caption="Minecraft", resizable=True)
+window = Window(width=800, height=600, caption="Minecraft", resizable=True)
 glLineWidth(2.0)
 # 启用Alpha混合
 glEnable(GL_BLEND)
