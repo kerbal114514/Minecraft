@@ -25,6 +25,7 @@ block_id = (
     "block.minecraft.oak_log",
     "block.minecraft.oak_leaves",
     "block.minecraft.glowstone",
+    "block.minecraft.water",
 )
 id_block = {
     "block.minecraft.sector_not_loaded":   0,
@@ -36,6 +37,7 @@ id_block = {
     "block.minecraft.oak_log":             6,
     "block.minecraft.oak_leaves":          7,
     "block.minecraft.glowstone":           8,
+    "block.minecraft.water":               9,
 };
 
 gamerule = {
@@ -77,7 +79,7 @@ for x in range(-simulate_distance, simulate_distance + 1):
         if x ** 2 + y ** 2 <= simulate_distance ** 2:
             simulate_sectors.add((x, y))
 
-images = [
+images = (
     "grass_block_top.png",    # 0
     "grass_block_side.png",   # 1
     "dirt.png",               # 2
@@ -87,16 +89,8 @@ images = [
     "oak_log_side.png",       # 6
     "oak_leaves.png",         # 7
     "glowstone.png",          # 8
-]
-textures = {
-    "block.minecraft.grass_block": (0, 2, 1, 1, 1, 1),
-    "block.minecraft.dirt": (2, 2, 2, 2, 2, 2),
-    "block.minecraft.bedrock": (3, 3, 3, 3, 3, 3),
-    "block.minecraft.stone": (4, 4, 4, 4, 4, 4),
-    "block.minecraft.oak_log": (5, 5, 6, 6, 6, 6),
-    "block.minecraft.oak_leaves": (7, 7, 7, 7, 7, 7),
-    "block.minecraft.glowstone": (8, 8, 8, 8, 8, 8),
-}
+    "water.png",              # 9
+)
 
 def create_texture_array(image_list, path="./Textures"):
     width, height = 16, 16
@@ -148,14 +142,6 @@ glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0, GL_RGBA, GL_UN
 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
 glBindTexture(GL_TEXTURE_2D, 0)
-
-def get_tex_array_data(block_name, face_index):
-    img_idx = textures[block_name][face_index]
-    uvs = [0,0, 1,0, 1,1, 0,1]
-    res = []
-    for i in range(0, 8, 2):
-        res.extend([uvs[i], uvs[i+1], float(img_idx)])
-    return res
 
 
 class Shader:
@@ -231,52 +217,6 @@ FACES = (
     (0, 0, -1),
 )
 
-def empty_update_func(self, x, y, z):
-    return False
-
-block_update_func = {
-    "block.minecraft.sector_not_loaded": empty_update_func,
-    "block.minecraft.air": empty_update_func,
-    "block.minecraft.grass_block": empty_update_func,
-    "block.minecraft.dirt": empty_update_func,
-    "block.minecraft.bedrock": empty_update_func,
-    "block.minecraft.stone": empty_update_func,
-    "block.minecraft.oak_log": empty_update_func,
-    "block.minecraft.oak_leaves": empty_update_func,
-    "block.minecraft.glowstone": empty_update_func,
-}
-
-def grass_block_random_tick_func(self, x, y, z):
-    if self.world.get_block(x, y + 1, z) != 1 and self.world.get_block(x, y + 1, z) != 0:
-        self.world.remove_block(x, y, z)
-        self.world.add_block(x, y, z, id_block["block.minecraft.dirt"])
-        return True
-    return False
-
-def dirt_random_tick_func(self, x, y, z):
-    for dy in (-1, 0, 1):
-        for dx, _, dz in FACES[2:]:
-            nx, ny, nz = x + dx, y + dy, z + dz
-            if (self.world.get_block(nx, ny, nz) == 2 and (self.world.get_block(x, y + 1, z) == 1 or self.world.get_block(x, y + 1, z) == 0)):
-                self.world.remove_block(x, y, z)
-                self.world.add_block(x, y, z, id_block["block.minecraft.grass_block"])
-                return True
-
-block_random_tick_func = {
-    "block.minecraft.sector_not_loaded": empty_update_func,
-    "block.minecraft.air": empty_update_func,
-    "block.minecraft.grass_block": empty_update_func,#grass_block_random_tick_func,
-    "block.minecraft.dirt": empty_update_func,#dirt_random_tick_func,
-    "block.minecraft.bedrock": empty_update_func,
-    "block.minecraft.stone": empty_update_func,
-    "block.minecraft.oak_log": empty_update_func,
-    "block.minecraft.oak_leaves": empty_update_func,
-    "block.minecraft.glowstone": empty_update_func,
-}
-
-def empty_item_use_func(self):
-    pass
-
 def block_item_use_func(self, name):
     x, y, z = self.position
     y += 1.2
@@ -286,15 +226,19 @@ def block_item_use_func(self, name):
     if previous:
         self.world.add_block(*previous, id_block[name])
 
+def empty_item_use_func(self):
+    pass
+
 item_use_func = {
-    "item.minecraft.null": empty_item_use_func,
-    "item.minecraft.grass_block": lambda self : block_item_use_func(self, "block.minecraft.grass_block"),
-    "item.minecraft.dirt": lambda self : block_item_use_func(self, "block.minecraft.dirt"),
-    "item.minecraft.bedrock": lambda self : block_item_use_func(self, "block.minecraft.bedrock"),
-    "item.minecraft.stone": lambda self : block_item_use_func(self, "block.minecraft.stone"),
-    "item.minecraft.oak_log": lambda self : block_item_use_func(self, "block.minecraft.oak_log"),
-    "item.minecraft.oak_leaves": lambda self : block_item_use_func(self, "block.minecraft.oak_leaves"),
-    "item.minecraft.glowstone": lambda self : block_item_use_func(self, "block.minecraft.glowstone"),
+    "item.minecraft.null":          empty_item_use_func,
+    "item.minecraft.grass_block":   lambda self : block_item_use_func(self, "block.minecraft.grass_block"),
+    "item.minecraft.dirt":          lambda self : block_item_use_func(self, "block.minecraft.dirt"),
+    "item.minecraft.bedrock":       lambda self : block_item_use_func(self, "block.minecraft.bedrock"),
+    "item.minecraft.stone":         lambda self : block_item_use_func(self, "block.minecraft.stone"),
+    "item.minecraft.oak_log":       lambda self : block_item_use_func(self, "block.minecraft.oak_log"),
+    "item.minecraft.oak_leaves":    lambda self : block_item_use_func(self, "block.minecraft.oak_leaves"),
+    "item.minecraft.glowstone":     lambda self : block_item_use_func(self, "block.minecraft.glowstone"),
+    "item.minecraft.water":         lambda self : block_item_use_func(self, "block.minecraft.water"),
 }
 
 items_texture_id = {}
@@ -319,6 +263,7 @@ block_friction = (    # 摩擦系数
     15,   # block.minecraft.oak_log
     15,   # block.minecraft.oak_leaves
     15,   # block.minecraft.glowstone
+    5,    # block.minecraft.water
 )
 
 with open("Shaders/block_vertex_shader.glsl") as f:
@@ -401,7 +346,7 @@ class Window(pyglet.window.Window):
         self.vbo_size = {}
         self.vbo_reserve_size = {}
         # 函数字典
-        self.functions = {"block_update": self.block_update, "update_vbo_data": self.update_vbo_data, "set_schedule": self.set_schedule, "init_done": self.init_done}
+        self.functions = {"update_vbo_data": self.update_vbo_data, "set_schedule": self.set_schedule, "init_done": self.init_done}
         # 生成天空盒顶点数据
         vertex = []
         x, y, z = 0, 0, 0
@@ -422,14 +367,19 @@ class Window(pyglet.window.Window):
         self.inventory[0][4] = "item.minecraft.oak_log"
         self.inventory[0][5] = "item.minecraft.oak_leaves"
         self.inventory[0][6] = "item.minecraft.glowstone"
+        self.inventory[0][7] = "item.minecraft.water"
         self.activated_inventory_id = 1
         self.world.set_position(*self.position)
         # 上一次渲染时的 player_sky_light 值
         self.last_player_sky_light = 0
         # 更新玩家位置
         pyglet.clock.schedule_interval(self.update, 1 / 60)
-        # 随机刻
-        pyglet.clock.schedule_interval(self.process_random_tick, 1 / gamerule["tick_per_second"])
+        # 方块更新
+        pyglet.clock.schedule_interval(self.process_block_update, 1 / 20)
+
+    def process_block_update(self, dt):
+        if self.level == "normal":
+            self.world.process_block_update()
 
     def set_schedule(self, sort: str, nowcnt: int, allcnt: int):
         print(f"{sort}: {nowcnt} of {allcnt}, {int(round(nowcnt / allcnt * 100))}%", end="             \r")
@@ -484,27 +434,6 @@ class Window(pyglet.window.Window):
         self.world.unlock_sector_vertex_data_struct_mutex(x, y)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         self.vbo_size[(x, y)] = data[1] // 7
-
-    def block_update(self, x, y, z):
-        for dx, dy, dz in FACES:
-            nx, ny, nz = x + dx, y + dy, z + dz
-            block = self.world.get_block(nx, ny, nz)
-            if block != 1 and block != 0:
-                if block_update_func[block_id[block]](self, nx, ny, nz):
-                    self.world.add_operation("block_update", nx, ny, nz)
-
-    def process_random_tick(self, dt):
-        nx, ny = int(round(self.position[0])) // 16, int(round(self.position[2])) // 16
-        for dx, dy in simulate_sectors:
-            x, y = nx + dx, ny + dy
-            for _ in range(gamerule["random_tick_speed"]):
-                sdx = random.randint(0, 15)
-                sdz = random.randint(0, 15)
-                sdy = random.randint(0, 255)
-                pos = (x * 16 + sdx, sdy, y * 16 + sdz)
-                if (self.world.get_block(*pos) != 1 and self.world.get_block(*pos) != 0):
-                    if block_random_tick_func[block_id[self.world.get_block(*pos)]](self, *pos):
-                        self.world.add_operation(f"block_update {pos[0]} {pos[1]} {pos[2]}")
 
     def set_exclusive_mouse(self, exclusive):
         """ If `exclusive` is True, the game will capture the mouse, if False

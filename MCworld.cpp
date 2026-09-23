@@ -182,27 +182,6 @@ struct entity_box {
     double minx, maxx, miny, maxy, minz, maxz;
 };
 
-// 方块常量定义
-struct Block_type {
-    std::string name;
-    uint16_t id;
-    uint8_t light_attenuation;    // 光线通过此方块的衰减
-    uint8_t light;    // 方块本身的亮度（光源方块）
-    std::vector<entity_box> entity_box;
-    bool transparent;    // 是否透明
-    std::array<uint16_t, 6> texture;
-} block_types[] = {
-    {"block.minecraft.sector_not_loaded", 0, 1, 0, {}, false, {0, 0, 0, 0, 0, 0}},
-    {"block.minecraft.air", 1, 1, 0, {}, true,  {0, 0, 0, 0, 0, 0}},
-    {"block.minecraft.grass_block", 2, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {0, 2, 1, 1, 1, 1}},
-    {"block.minecraft.dirt", 3, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {2, 2, 2, 2, 2, 2}},
-    {"block.minecraft.stone", 4, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {4, 4, 4, 4, 4, 4}},
-    {"block.minecraft.bedrock", 5, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {3, 3, 3, 3, 3, 3}},
-    {"block.minecraft.oak_log", 6, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {5, 5, 6, 6, 6, 6}},
-    {"block.minecraft.oak_leaves", 7, 3, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, true, {7, 7, 7, 7, 7, 7}},
-    {"block.minecraft.glowstone", 8, 15, 15, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {8, 8, 8, 8, 8, 8}},
-};
-
 const std::vector<entity_box> entity_entity_boxes[] = {{entity_box{-0.3, 0.3, -0.5, 1.3, -0.3, 0.3}}};
 
 
@@ -275,6 +254,11 @@ inline std::tuple<float, float, float> normalize(float x, float y, float z) {
     return {x / tmp, y / tmp, z / tmp};
 }
 
+struct block_update_entry {
+    Block_pos p;
+    uint16_t delay;
+    uint16_t block;    // 入队时这次更新的方块，若处理时不是这个方块，跳过
+};
 
 class World {
 private:
@@ -286,6 +270,7 @@ private:
     Pos position;
     std::unordered_set<Sector_pos, Sector_pos_hash> shown_sectors, generated_sectors, decorated_sectors, generated_holes, calced_light_sectors;
     std::unordered_map<Sector_pos, std::bitset<16 * 256 * 16>, Sector_pos_hash> holes;  // true即洞穴
+    std::vector<block_update_entry> block_updates;
     FastNoise::SmartNode<> noise;
     FastNoise::SmartNode<> terrain_noise_generater;
     int seed;
@@ -294,6 +279,7 @@ private:
     mutable std::recursive_mutex world_mutex;       // world
     mutable std::recursive_mutex operations_mutex;  // operations
     mutable std::recursive_mutex position_mutex;    // position
+    mutable std::recursive_mutex block_updates_mutex;    // block_updates
     // 对于多线程数据竞争的问题，现在除了主线程，另外有一个 process_sector_thread
     // 的线程，这个线程处理的都是边缘的区块。 主线程只有python调用 add_block,
     // remove_block, get_block, hit_test, intersect 会触发对 world
@@ -328,13 +314,15 @@ private:
 public:
     World(int seed_arg, int simulate_distance_arg);
     ~World();
+    inline void update_block(const Block_pos &p, uint16_t delay=0);
+    void process_block_update();
     Sector* get_sector_ptr(const Sector_pos &p) const;
     Block *find_block(int x, int y, int z) const;
     inline Block *find_block(const Block_pos &p) const;
     void set_position(double x, double y, double z);
     void add_operation(std::string op);
-    void add_block(int x, int y, int z, uint16_t id, bool auto_process = true, bool has_NBT = false, const std::map<std::string, std::string> &NBT = emptyNBT);
-    void remove_block(const int x, const int y, const int z, bool auto_process = true);
+    void add_block(int x, int y, int z, uint16_t id, bool auto_process = true, bool has_NBT = false, const std::map<std::string, std::string> &NBT = emptyNBT, bool block_update = true);
+    void remove_block(const int x, const int y, const int z, bool auto_process = true, bool block_update = true);
     inline void lock_sector_vertex_data_struct_mutex(int x, int y);
     inline void unlock_sector_vertex_data_struct_mutex(int x, int y);
     inline void start_process_sector_thread();
@@ -345,6 +333,45 @@ public:
     inline pybind11::tuple get_sector_vbo_data_ptr(int x, int y) const;
     inline int get_brightness(int x, int y, int z) const;
     inline int get_max_height(int x, int z) const;
+};
+
+// 方块常量定义
+struct Block_type {
+    std::string name;
+    uint16_t id;
+    uint8_t light_attenuation;    // 光线通过此方块的衰减
+    uint8_t light;    // 方块本身的亮度（光源方块）
+    std::vector<entity_box> entity_box;
+    bool transparent;    // 是否透明
+    std::array<uint16_t, 6> texture;
+    bool (*update_func)(World*, const Block_pos&);    // 方块更新函数
+    uint16_t schedule_delay;    // 被放置/邻居变化时，多久后触发 update_func
+};
+bool empty_update_func(World*, const Block_pos&) {
+    return false;
+}
+bool water_update_func(World* self, const Block_pos& p) {
+    bool flag = false;
+    for (int i = 1; i < 6; ++i) {
+        if (self->find_block(p + FACES[i])->id == 1) {
+            auto [dx, dy, dz] = FACES[i];
+            self->add_block(p.x + dx, p.y + dy, p.z + dz, 9, true, false, emptyNBT, false);
+            flag = true;
+        }
+    }
+    return flag;
+}
+Block_type block_types[] = {
+    {"block.minecraft.sector_not_loaded", 0, 1, 0, {}, false, {0, 0, 0, 0, 0, 0}, &empty_update_func, 0},
+    {"block.minecraft.air", 1, 1, 0, {}, true,  {0, 0, 0, 0, 0, 0}, &empty_update_func, 0},
+    {"block.minecraft.grass_block", 2, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {0, 2, 1, 1, 1, 1}, &empty_update_func, 0},
+    {"block.minecraft.dirt", 3, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {2, 2, 2, 2, 2, 2}, &empty_update_func, 0},
+    {"block.minecraft.stone", 4, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {4, 4, 4, 4, 4, 4}, &empty_update_func, 0},
+    {"block.minecraft.bedrock", 5, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {3, 3, 3, 3, 3, 3}, &empty_update_func, 0},
+    {"block.minecraft.oak_log", 6, 15, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {5, 5, 6, 6, 6, 6}, &empty_update_func, 0},
+    {"block.minecraft.oak_leaves", 7, 3, 0, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, true, {7, 7, 7, 7, 7, 7}, &empty_update_func, 0},
+    {"block.minecraft.glowstone", 8, 15, 15, {entity_box{-0.5, 0.5, -0.5, 0.5, -0.5, 0.5}}, false, {8, 8, 8, 8, 8, 8}, &empty_update_func, 0},
+    {"block.minecraft.water", 9, 1, 0, {}, true, {9, 9, 9, 9, 9, 9}, &water_update_func, 4},
 };
 
 struct hashless_functions {
@@ -703,18 +730,34 @@ template<typename F> inline uint64_t exposed_invisible_block(const F&, int, int,
 template<typename F> uint64_t exposed_solid_block(const F &find_block, int x, int y, int z) {
     uint64_t res = 0ull;
     Block_pos p = {x, y, z};
-    Block *cur;
+    Block *cur = find_block(p), *neighbor;
     for (int i = 0, dx, dy, dz; i < 6; ++i) {
         dx = FACES[i].x, dy = FACES[i].y, dz = FACES[i].z;
-        cur = find_block(p);
+        neighbor = find_block(p + FACES[i]);
         // 同样的透明方块之间的面一个隐藏，一个显示
         if (y + dy < 0 || y + dy >= 256) {
             res |= (1ull << i);
-        } else if (block_types[cur->id].transparent && (!block_types[find_block(p + FACES[i])->id].transparent)) {
+        } else if (block_types[cur->id].transparent && (!block_types[neighbor->id].transparent)) {
             res |= (1ull << i);
-        } else if (block_types[find_block(p + FACES[i])->id].transparent && find_block(p + FACES[i])->id != cur->id) {
+        } else if (block_types[neighbor->id].transparent && neighbor->id != cur->id) {
             res |= (1ull << i);
-        } else if (block_types[find_block(p + FACES[i])->id].transparent && find_block(p + FACES[i])->id == cur->id && (dx == 1 || dy == 1 || dz == 1)) {
+        } else if (block_types[neighbor->id].transparent && neighbor->id == cur->id && (dx == 1 || dy == 1 || dz == 1)) {
+            res |= (1ull << i);
+        }
+    }
+    return res;
+}
+
+template<typename F> uint64_t exposed_water(const F &find_block, int x, int y, int z) {
+    uint64_t res = 0ull;
+    Block_pos p = {x, y, z};
+    Block *neighbor;
+    for (int i = 0, dy; i < 6; ++i) {
+        dy = FACES[i].y;
+        neighbor = find_block(p + FACES[i]);
+        if (y + dy < 0 || y + dy >= 256) {
+            res |= (1ull << i);
+        } else if (neighbor->id != 9 && block_types[neighbor->id].transparent) {
             res |= (1ull << i);
         }
     }
@@ -733,6 +776,7 @@ template<typename F> uint64_t World::exposed(int x, int y, int z, const F& find_
         &exposed_solid_block<F>,        // 6
         &exposed_solid_block<F>,        // 7
         &exposed_solid_block<F>,        // 8
+        &exposed_water<F>,              // 9
     };
     return table[find_block_func({x, y, z})->id](find_block_func, x, y, z);
 }
@@ -932,9 +976,10 @@ std::vector<Block_pos> World::calc_light(int x, int y, int z) {
                 if (neighbor->id == 0) {
                     continue;
                 }
-                if (neighbor->id == 1) {
+                if (block_types[neighbor->id].transparent) {
                     bfs.push(now + FACES[i]);
-                } else {
+                }
+                if (neighbor->id != 1) {
                     if (vst.count(now + FACES[i]) == 0) {
                         updated.push_back(now + FACES[i]);
                         vst.insert(now + FACES[i]);
@@ -1082,6 +1127,31 @@ void World::get_tex_array_data(int x, int y, int z, int face_index, std::array<f
     }
 }
 
+
+inline void World::update_block(const Block_pos &p, uint16_t delay) {
+    std::lock_guard<std::recursive_mutex> lock_block_updates(block_updates_mutex);
+    block_updates.push_back({p, delay, find_block(p)->id});
+}
+
+void World::process_block_update() {
+    std::vector<block_update_entry> now;
+    for (size_t i = 0; i < block_updates.size(); ++i) {
+        auto [p, delay, block] = block_updates[i];
+        if (block == find_block(p)->id) {
+            if (delay) {
+                now.push_back({p, (uint16_t)(delay - 1), block});
+            } else {
+                if (block_types[find_block(p)->id].update_func(this, p)) {
+                    for (int j = 0; j < 6; ++j) {
+                        now.push_back({p + FACES[j], block_types[find_block(p + FACES[j])->id].schedule_delay, find_block(p + FACES[j])->id});
+                    }
+                }
+            }
+        }
+    }
+    block_updates = now;
+}
+
 World::World(int seed_arg, int simulate_distance_arg) {
     noise = FastNoise::NewFromEncodedNodeTree("DQkR@BSEMJBw@AEhDBAMAAMhCDA==");
     terrain_noise_generater = FastNoise::NewFromEncodedNodeTree("EQ@AJZDCQM@ABIQwQDAAD6QwQ=");
@@ -1134,13 +1204,17 @@ void World::add_operation(std::string op) {
     operations.push_back(op);
 }
 
-void World::add_block(int x, int y, int z, uint16_t id, bool auto_process, bool has_NBT, const std::map<std::string, std::string> &NBT) {
+void World::add_block(int x, int y, int z, uint16_t id, bool auto_process, bool has_NBT, const std::map<std::string, std::string> &NBT, bool block_update) {
     if (auto_process) {
         world_mutex.lock();
     }
     Block *block = find_block(x, y, z);
-    if (block->id == 0 || block->id != 1)
+    if (block->id == 0 || block->id != 1) {
+        if (auto_process) {
+            world_mutex.unlock();
+        }
         return;
+    }
     if (auto_process) {
         Pos position_local;
         {
@@ -1184,14 +1258,19 @@ void World::add_block(int x, int y, int z, uint16_t id, bool auto_process, bool 
             updated_vbos.insert(get_sector(x + dx, z + dz));
         }
         std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(std::format("block_update {} {} {}", x, y, z));
+        if (block_update) {
+            update_block({x, y, z}, block_types[id].schedule_delay);
+            for (int i = 0; i < 6; ++i) {
+                update_block(Block_pos{x, y, z} + FACES[i], block_types[find_block(x, y, z)->id].schedule_delay);
+            }
+        }
         for (const Sector_pos &i : updated_vbos) {
             operations.push_back(std::format("update_vbo_data {} {}", i.x, i.y));
         }
     }
 }
 
-void World::remove_block(const int x, const int y, const int z, bool auto_process) {
+void World::remove_block(const int x, const int y, const int z, bool auto_process, bool block_update) {
     std::lock_guard<std::recursive_mutex> lock_world(world_mutex);
     Block *block = find_block(x, y, z);
     if (block->id == 0 || block->id == 1)
@@ -1223,7 +1302,11 @@ void World::remove_block(const int x, const int y, const int z, bool auto_proces
             updated_vbos.insert(get_sector(x + dx, z + dz));
         }
         std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
-        operations.push_back(std::format("block_update {} {} {}", x, y, z));
+        if (block_update) {
+            for (int i = 0; i < 6; ++i) {
+                update_block(Block_pos{x, y, z} + FACES[i], block_types[find_block(Block_pos{x, y, z} + FACES[i])->id].schedule_delay);
+            }
+        }
         for (const Sector_pos &i : updated_vbos) {
             operations.push_back(std::format("update_vbo_data {} {}", i.x, i.y));
         }
@@ -1323,8 +1406,8 @@ PYBIND11_MODULE(MCworld, m) {
         .def("start_process_sector_thread",                 &World::start_process_sector_thread, pybind11::call_guard<pybind11::gil_scoped_release>())
         .def("give_operation",                              &World::give_operation)
         .def("get_block",                                   &World::get_block)
-        .def("add_block",                                   &World::add_block, "x"_a, "y"_a, "z"_a, "id"_a, "auto_process"_a = true, "has_NBT"_a = false, pybind11::arg("NBT") = emptyNBT)
-        .def("remove_block",                                &World::remove_block, "x"_a, "y"_a, "z"_a, "auto_process"_a = true)
+        .def("add_block",                                   &World::add_block, "x"_a, "y"_a, "z"_a, "id"_a, "auto_process"_a = true, "has_NBT"_a = false, pybind11::arg("NBT") = emptyNBT, "block_update"_a = true)
+        .def("remove_block",                                &World::remove_block, "x"_a, "y"_a, "z"_a, "auto_process"_a = true, "block_update"_a = true)
         .def("intersect",                                   &World::intersect)
         .def("hit_test",                                    &World::hit_test)
         .def("set_position",                                &World::set_position)
@@ -1333,5 +1416,6 @@ PYBIND11_MODULE(MCworld, m) {
         .def("lock_sector_vertex_data_struct_mutex",        &World::lock_sector_vertex_data_struct_mutex)
         .def("unlock_sector_vertex_data_struct_mutex",      &World::unlock_sector_vertex_data_struct_mutex)
         .def("get_brightness",                              &World::get_brightness)
-        .def("get_max_height",                              &World::get_max_height);
+        .def("get_max_height",                              &World::get_max_height)
+        .def("process_block_update",                        &World::process_block_update);
 }
