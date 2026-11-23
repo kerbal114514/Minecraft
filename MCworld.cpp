@@ -22,7 +22,6 @@
 #include <thread>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 struct Sector_pos {
@@ -286,7 +285,7 @@ private:
     // remove_block, get_block, hit_test, intersect 会触发对 world
     // 的访问，且只会与玩家所在的区块相关，并且这些函数内部都加锁了
     // unordered_map.at操作是线程安全的，所以除了 generate_sector 中 operator[],
-    // 其他process_sector_thread 中调用的函数不需要加锁。
+    // 其他process_sector_thread 中调用的函数不需要加锁，但是与process_sector_thread并行的函数需要加锁。
 
     std::atomic<int> running_threads;
     std::atomic<bool> exit_flag;
@@ -498,6 +497,7 @@ void World::stop_all_thread() {
 }
 
 Block *World::find_block(int x, int y, int z) const {
+    // 出于性能考虑，本函数内不加锁
     if (y < 0 || y >= 256) {
         return &sector_not_loaded;
     }
@@ -523,7 +523,6 @@ void World::process_sector_thread() {
             if (!generated_holes.count(now)) {
                 generated_holes.insert(now);
                 generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 16, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
-                generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 48, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
             }
         }
         // 生成区块
@@ -557,7 +556,6 @@ void World::init_sectors() {
     for (Sector_pos now : generate_holes_sectors) {
         generated_holes.insert(now);
         generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 16, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
-        generate_holes(now.x * 16 + hash2D(now.x, now.y, seed + 2) * 16, hash2D(now.x, now.y, seed) * 24 + 48, now.y * 16 + hash2D(now.x, now.y, seed + 1) * 16);
         ++cnt;
         {
             std::lock_guard<std::recursive_mutex> lock_operations(operations_mutex);
@@ -614,11 +612,11 @@ void World::generate_sector(int dx, int dy) {
     // height1: 总体高度（石头+泥土），height2: 泥土和草方块的高度，石头高度为height1 - height2
     auto get_height1 = [](float x) -> float {
         if (x <= 0.5f) {
-            return x * 30 + 64;    // 64 ~ 79
+            return x * 30;    // 0 ~ 15
         } else if (x <= 0.8f) {
-            return x * 120 + 19;    // 79 ~ 115
+            return x * 120 - 45;    // 15 ~ 51
         } else {
-            return x * 50 + 75;    // 115 ~ 125
+            return x * 50 + 11;    // 51 ~ 61
         }
     };
     auto terrain_fluctuate_calc = [](float n) {
@@ -632,7 +630,7 @@ void World::generate_sector(int dx, int dy) {
     };
     for (int z = 0; z != 18; ++z) {
         for (int x = 0; x != 18; ++x) {
-            height1[z * 18 + x] = get_height1((noise_terrain[z * 18 + x] + 1.0f) * 0.5f) * terrain_fluctuate_calc((noise_fluctuate[z * 18 + x] + 1.0f) * 0.5f) + noise_altitude[z * 18 + x] * 40;
+            height1[z * 18 + x] = get_height1((noise_terrain[z * 18 + x] + 1.0f) * 0.5f) * terrain_fluctuate_calc((noise_fluctuate[z * 18 + x] + 1.0f) * 0.5f) + noise_altitude[z * 18 + x] * 20 + 64;
         }
     }
     auto get_height2 = [&height1](int x, int z) {
@@ -763,7 +761,7 @@ void World::generate_tree(int sx, int sy) {
                 default:
                     tree_density = 0.0f;
             }
-            if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[get_block_index(x, y, z)].id != 1) {
+            if (has_tree(sx * 16 + x, sy * 16 + z, tree_density) && sector->blocks[get_block_index(x, y, z)].id == 2) {
                 for (int dy = 1; dy < 6; ++dy) {
                     add_block(sx * 16 + x, y + dy, sy * 16 + z, 6, false);
                 }
@@ -1016,7 +1014,7 @@ void World::generate_holes(float x, float y, float z) {
                         final_x = x_int + bx, final_y = y_int + by, final_z = z_int + bz;
                         if (final_y <= 0 || final_y >= 256)
                             break;
-                        holes[get_sector(final_x, final_z)][get_block_index(final_x, final_y, final_z)] = false;
+                        holes[get_sector(final_x, final_z)][get_block_index(final_x, final_y, final_z)] = true;
                     }
                 }
             }
@@ -1031,7 +1029,7 @@ std::vector<Block_pos> World::calc_light(int x, int y, int z) {
     uint8_t tmp_light;
     Block *neighbor;
     std::vector<Block_pos> updated;
-    std::unordered_set<Block_pos, Block_pos_hash> vst;
+    boost::unordered_flat_set<Block_pos, Block_pos_hash> vst;
     Block_pos now;
     uint8_t final_light;
     // 方块光照
