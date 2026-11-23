@@ -9,7 +9,10 @@ uniform float u_render_distance;
 uniform vec3 u_position;
 uniform vec3 u_light_direction;
 uniform float u_player_sky_light;    // [0, 1]
+uniform float u_in_liquid;    // 0表示空气，1表示水
+int in_liquid;
 vec4 get_sky_color(float factor) {
+    if (in_liquid == 1) return vec4(0.0, 0.0, u_player_sky_light * 0.5, 1.0);
     vec4 skyColor = vec4(0.48, 0.72, 0.93, 1.0);
     vec4 horizonColor = vec4(0.7, 0.9, 1.0, 1.0);
     vec4 final_color;
@@ -22,17 +25,19 @@ vec4 get_sky_color(float factor) {
     return vec4(final_color.rgb * u_player_sky_light, final_color.a);
 }
 void main() {
-    if (v_distance > u_render_distance)
-        discard;
+    float render_distance = u_render_distance;
+    in_liquid = int(floor(u_in_liquid + 0.5));
+    if (in_liquid == 1) render_distance = 16.0;
+    if (v_distance > render_distance) discard;
     vec4 color = texture(u_texture_array, v_tex_coords);
-    if (color.a < 0.5)
-        discard;
+    if (color.a < 0.5) discard;
+    if (in_liquid == 1) color.rgb = mix(color.rgb, vec3(0.0, 0.0, 1.0), 0.3);
     float brightness = max(dot(u_light_direction, v_normal), 0.8);
     color = vec4(color.rgb * brightness * v_brightness, 1.0);
-    if (u_render_distance - v_distance < 8.0) {
+    if (render_distance - v_distance < 8.0) {
         float height = (90 - degrees(acos(dot(normalize(v_vertex_pos - u_position), vec3(0, 1, 0))))) / 90.0;
         float factor = clamp(height - 0.1, -1.0, 1.0);
-        color = mix(get_sky_color(factor), color, (u_render_distance - v_distance) / 8.0);
+        color = mix(get_sky_color(factor), color, (render_distance - v_distance) / 8.0);
     }
     color.rgb = clamp(color.rgb, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0));
     gl_FragColor = color;

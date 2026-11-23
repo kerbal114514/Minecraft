@@ -56,7 +56,7 @@ gamerule = {
 
 settings = {
     "gui_size": 2,
-    "simulate_distance": 8,
+    "simulate_distance": 12,
 }
 
 def cube_vertices(x, y, z, n):
@@ -263,7 +263,20 @@ block_friction = (    # 摩擦系数
     15,   # block.minecraft.oak_log
     15,   # block.minecraft.oak_leaves
     15,   # block.minecraft.glowstone
-    5,    # block.minecraft.water
+    15,    # block.minecraft.water
+)
+
+block_resistance = (    # 阻力系数
+    2,    # block.minecraft.air
+    2,    # block.minecraft.sector_not_loaded
+    15,   # block.minecraft.grass_block
+    15,   # block.minecraft.dirt
+    15,   # block.minecraft.bedrock
+    15,   # block.minecraft.stone
+    15,   # block.minecraft.oak_log
+    15,   # block.minecraft.oak_leaves
+    15,   # block.minecraft.glowstone
+    50,    # block.minecraft.water
 )
 
 with open("Shaders/block_vertex_shader.glsl") as f:
@@ -338,8 +351,9 @@ class Window(pyglet.window.Window):
             "escape_menu.save_and_return": (0, -15),
         }
         # 着色器
-        self.block_shader = Shader(block_vertex_shader_code, block_fragment_shader_code, "u_render_distance", "u_position", "u_light_direction", "u_player_sky_light")
-        self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code, "u_player_sky_light")
+        self.block_shader = Shader(block_vertex_shader_code, block_fragment_shader_code,
+                                   "u_render_distance", "u_position", "u_light_direction", "u_player_sky_light", "u_in_liquid")
+        self.skybox_shader = Shader(skybox_vertex_shader_code, skybox_fragment_shader_code, "u_player_sky_light", "u_in_liquid")
         # VBO id
         self.vbo_id = {}
         self.vao_id = {}
@@ -493,6 +507,7 @@ class Window(pyglet.window.Window):
 
     def process_queue(self):
         start = time.perf_counter()
+        done_vbo_updates = set()
         while time.perf_counter() - start < 1 / gamerule["tick_per_second"] / 2:
             operation = self.world.give_operation()
             if operation == "None":
@@ -504,7 +519,13 @@ class Window(pyglet.window.Window):
             else:
                 for i in range(1, len(operation)):
                     operation[i] = int(operation[i])
-            self.functions[operation[0]](*operation[1:])
+            if operation[0] == 'update_vbo_data':
+                x, y = operation[1:]
+                if (x, y) not in done_vbo_updates:
+                    done_vbo_updates.add((x, y))
+                    self.functions[operation[0]](*operation[1:])
+            else:
+                self.functions[operation[0]](*operation[1:])
 
     def update(self, dt):
         """ This method is scheduled to be called repeatedly by the pyglet
@@ -553,7 +574,7 @@ class Window(pyglet.window.Window):
         else:
             speed = gamerule["walk_speed"]
         # 摩擦系数
-        m = self.get_friction()
+        m, m2 = self.get_friction_and_resistance()
         d = dt * speed * m
         dx, dy, dz = self.get_motion_vector()
         dx, dz = dx * d + self.delta[0], dz * d + self.delta[2]
@@ -561,7 +582,7 @@ class Window(pyglet.window.Window):
             dy = dy * d / m * 15 + self.delta[1]
         else:
             dy = dy * d + self.delta[1]
-        dx, dz = dx * (1 - dt * m) , dz * (1 - dt * m)
+        dx, dz = dx * (1 - dt * m2) , dz * (1 - dt * m2)
         self.delta = [dx, dy, dz]
         # 重力
         if not self.flying:
@@ -605,15 +626,11 @@ class Window(pyglet.window.Window):
             self.delta[2] = 0
         self.position = (x, y, z)
 
-    def get_friction(self):
-        """获取摩擦系数
+    def get_friction_and_resistance(self):
+        """获取最大摩擦和阻力系数
 
         """
-        x, y, z = self.position
-        max_friction = 0
-        for dx, dz in ((-0.3, -0.3), (0.3, 0.3), (-0.3, 0.3), (0.3, -0.3), (0, 0)):
-            max_friction = max(max_friction, block_friction[self.world.get_block(int(round(x + dx)), int(round(y - 0.55)), int(round(z + dz)))])
-        return max_friction
+        return (2, 2) if self.flying else self.world.get_friction_and_resistance(0, *self.position)
 
     def on_mouse_press(self, x, y, button, modifiers):
         """ Called when a mouse button is pressed. See pyglet docs for button
@@ -870,9 +887,15 @@ class Window(pyglet.window.Window):
         if abs(new_player_sky_light - player_sky_light) > 0.001:
             player_sky_light = new_player_sky_light
         self.last_player_sky_light = player_sky_light
+        intersect_blocks = self.world.get_intersect_block(x, y, z)
         # 绘制天空
         glDepthMask(GL_FALSE)
-        self.draw_sky(player_sky_light)
+        self.skybox_shader.bind(
+            u_player_sky_light=(player_sky_light, ),
+            u_in_liquid=(float(int(intersect_blocks == 9)), ),
+        )
+        self.sky_box.draw(GL_QUADS)
+        self.skybox_shader.unbind()
         glDepthMask(GL_TRUE)
         glTranslatef(-x, -y, -z)
         sector = (int(self.position[0]) // 16, int(self.position[2]) // 16)
@@ -895,7 +918,12 @@ class Window(pyglet.window.Window):
         # 绑定纹理
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D_ARRAY, tex_array_id)
-        self.block_shader.bind(u_render_distance=(float(self.render_distance * 16 - 16), ), u_position=self.position, u_light_direction=(dx * tmp, dy * tmp, dz * tmp), u_player_sky_light=(player_sky_light, ))
+        self.block_shader.bind(
+            u_render_distance=(float(self.render_distance * 16 - 16), ),
+            u_position=self.position, u_light_direction=(dx * tmp, dy * tmp, dz * tmp),
+            u_player_sky_light=(player_sky_light, ),
+            u_in_liquid=(float(int(intersect_blocks == 9)), ),
+        )
         glDepthFunc(GL_LEQUAL)
         for key in self.vao_id:
             if (sector[0] - key[0]) ** 2 + (sector[1] - key[1]) ** 2 > self.render_distance ** 2:
@@ -968,14 +996,6 @@ class Window(pyglet.window.Window):
             glColor3d(0, 0, 0)
             for i in vertex_data:
                 pyglet.graphics.draw(4, GL_LINE_LOOP, ("v3f", i))
-
-    def draw_sky(self, player_sky_light):
-        """ 绘制天空盒
-
-        """
-        self.skybox_shader.bind(u_player_sky_light=(player_sky_light, ))
-        self.sky_box.draw(GL_QUADS)
-        self.skybox_shader.unbind()
 
 window = Window(width=800, height=600, caption="Minecraft", resizable=True)
 glLineWidth(2.0)
